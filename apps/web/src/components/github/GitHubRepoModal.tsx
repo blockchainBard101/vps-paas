@@ -51,6 +51,7 @@ export interface PendingDeployInfo {
   tempId: string;
   name: string;
   repoName: string;
+  cloneUrl: string;
   branch: string;
   subfolder?: string;
   port: number;
@@ -402,7 +403,7 @@ export function GitHubRepoModal({
       tempId,
       name: subName,
       repoName: selectedRepo.name,
-      cloneUrl: selectedRepo.cloneUrl,
+      cloneUrl: selectedRepo.cloneUrl || `https://github.com/${selectedRepo.owner || 'blockchainbard'}/${selectedRepo.name}.git`,
       branch: selectedBranch,
       subfolder: targetSubfolder,
       port,

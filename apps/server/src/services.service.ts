@@ -139,6 +139,7 @@ export class ServicesService implements OnModuleInit {
   }
 
   async deployService(options: {
+    id?: string;
     name: string;
     image?: string;
     env?: Record<string, string>;
@@ -154,7 +155,7 @@ export class ServicesService implements OnModuleInit {
     startCommand?: string;
     command?: string[];
   }): Promise<ServiceRecord> {
-    const serviceId = crypto.randomBytes(4).toString('hex');
+    const serviceId = options.id || crypto.randomBytes(4).toString('hex');
     const safeName = options.name.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
     const containerName = `paas-svc-${safeName}-${serviceId}`;
     const image = options.image || 'nginx:alpine';
@@ -178,6 +179,13 @@ export class ServicesService implements OnModuleInit {
       }
 
       await this.dockerService.ensureInternalNetwork();
+
+      // Clean up any existing container with the exact same name (e.g. during in-place redeploy)
+      try {
+        const existingContainer = this.dockerService.client.getContainer(containerName);
+        await existingContainer.stop().catch(() => {});
+        await existingContainer.remove({ force: true }).catch(() => {});
+      } catch {}
 
       const exposedPort = options.port || 80;
       const portKey = `${exposedPort}/tcp`;

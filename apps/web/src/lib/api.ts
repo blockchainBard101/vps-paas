@@ -244,6 +244,9 @@ export interface ServiceSettingsUpdate {
   installCommand?: string;
   buildCommand?: string;
   startCommand?: string;
+  repoName?: string;
+  branch?: string;
+  cloneUrl?: string;
 }
 
 export interface ServiceRecord {
@@ -560,6 +563,19 @@ export async function updateServiceSettings(
     const err = await res.text();
     throw new Error(`Failed to update service settings: ${err}`);
   }
+  return res.json();
+}
+
+export async function fetchDeployHistory(serviceId: string): Promise<Array<{
+  id: string;
+  status: 'building' | 'success' | 'failed';
+  createdAt: string;
+  branch: string;
+  repoName: string;
+  logsCount: number;
+}>> {
+  const res = await fetch(`${API_BASE}/github/deployments/history/${encodeURIComponent(serviceId)}`);
+  if (!res.ok) return [];
   return res.json();
 }
 

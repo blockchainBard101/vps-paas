@@ -13,5 +13,9 @@
     "build:web": "npm run build --workspace=web",
     "build:server": "npm run build --workspace=server",
     "lint": "npm run lint --workspaces"
+  },
+  "optionalDependencies": {
+    "@tailwindcss/oxide-linux-x64-gnu": "^4.3.3",
+    "lightningcss-linux-x64-gnu": "^1.33.0"
   }
 }

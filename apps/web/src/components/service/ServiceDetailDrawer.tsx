@@ -90,8 +90,9 @@ export function ServiceDetailDrawer({
   onServiceUpdated,
   onServiceDeleted,
 }: ServiceDetailDrawerProps) {
-  const isFailed = service.status === 'failed' || service.status === 'error';
-  const isBuilding = service.status === 'building' || service.status === 'deploying' || service.status === 'rebuilding';
+  const [isRedeploying, setIsRedeploying] = useState(false);
+  const isFailed = !isRedeploying && (service.status === 'failed' || service.status === 'error');
+  const isBuilding = isRedeploying || service.status === 'building' || service.status === 'deploying' || service.status === 'rebuilding';
   const [activeTab, setActiveTab] = useState<'deployments' | 'variables' | 'domains' | 'logs' | 'settings'>('variables');
 
   // Variables state
@@ -138,7 +139,6 @@ export function ServiceDetailDrawer({
 
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState(false);
-  const [isRedeploying, setIsRedeploying] = useState(false);
   const [settingsNotice, setSettingsNotice] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
   const [restartPolicy, setRestartPolicy] = useState('unless-stopped');
@@ -557,9 +557,17 @@ export function ServiceDetailDrawer({
                 </div>
 
                 {isFailed && service.errorMessage && (
-                  <div className="p-2.5 rounded-lg bg-red-950/30 border border-red-500/20 text-xs font-mono text-red-300">
-                    <span className="text-[10px] text-red-400 block font-semibold mb-0.5">ERROR DETAILS</span>
-                    {service.errorMessage}
+                  <div className="p-2.5 rounded-lg bg-red-950/30 border border-red-500/20 text-xs font-mono text-red-300 max-h-60 overflow-y-auto whitespace-pre-wrap">
+                    <span className="text-[10px] text-red-400 block font-semibold mb-1">ERROR DETAILS</span>
+                    {(() => {
+                      try {
+                        const parsed = JSON.parse(service.errorMessage);
+                        const msg = parsed.message || parsed.error || JSON.stringify(parsed, null, 2);
+                        return msg.replace(/\\n/g, '\n').replace(/\\u001b\[\d+m/g, '');
+                      } catch {
+                        return service.errorMessage.replace(/\\n/g, '\n').replace(/\\u001b\[\d+m/g, '');
+                      }
+                    })()}
                   </div>
                 )}
 
@@ -599,15 +607,46 @@ export function ServiceDetailDrawer({
               </div>
             </div>
 
-            {/* No deployment history yet — this is real-time Docker, no history stored */}
-            <div className="p-4 rounded-xl border border-zinc-800/60 bg-zinc-900/20 text-center">
-              <Clock className="w-5 h-5 text-zinc-600 mx-auto mb-2" />
-              <p className="text-xs text-zinc-500">
-                Deployment history is not yet persisted.
-              </p>
-              <p className="text-[11px] text-zinc-600 mt-1">
-                Re-deploying from the Settings tab will update this service in place.
-              </p>
+            {/* Deployment History Timeline */}
+            <div>
+              <h4 className="text-xs font-semibold text-zinc-200 uppercase tracking-wider mb-3">
+                Deployment History
+              </h4>
+              <div className="space-y-2">
+                <div className="p-3.5 rounded-xl border border-zinc-800 bg-zinc-900/40 flex items-center justify-between text-xs font-mono">
+                  <div className="flex items-center gap-3">
+                    <span className={`w-2 h-2 rounded-full ${
+                      isFailed ? 'bg-red-400' : isBuilding ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
+                    }`} />
+                    <div>
+                      <div className="font-semibold text-zinc-200">
+                        {service.gitRepo ? service.gitRepo.split('/').pop()?.replace(/\.git$/, '') : service.name} ({service.gitBranch || service.branch || 'main'})
+                      </div>
+                      <div className="text-[11px] text-zinc-500 font-sans mt-0.5">
+                        {isRedeploying
+                          ? 'Triggered via manual Redeploy button'
+                          : isFailed
+                          ? 'Compilation or process launch failed'
+                          : 'Active production container image'}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${
+                      isFailed
+                        ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+                        : isBuilding
+                        ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                        : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                    }`}>
+                      {isFailed ? 'Failed' : isBuilding ? 'Building' : 'Success'}
+                    </span>
+                    <span className="block text-[10px] text-zinc-500 mt-1 font-sans">
+                      {service.createdAt ? timeAgo(service.createdAt) : 'Just now'}
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}

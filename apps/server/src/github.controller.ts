@@ -355,6 +355,11 @@ export class GitHubController {
     return this.githubService.getBuildLogs(id);
   }
 
+  @Get('deployments/history/:serviceId')
+  getDeployHistory(@Param('serviceId') serviceId: string) {
+    return this.githubService.getDeployHistory(serviceId);
+  }
+
   @Post('redeploy/:serviceId')
   redeployService(
     @Param('serviceId') serviceId: string,

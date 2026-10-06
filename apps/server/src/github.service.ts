@@ -105,7 +105,7 @@ export class GitHubService implements OnModuleInit {
     );
   }
 
-  public appendBuildLog(session: { logs: string[]; listeners: Set<(chunk: string) => void> }, text: string) {
+  public appendBuildLog(session: { ids: Set<string>; repoName: string; logs: string[]; listeners: Set<(chunk: string) => void> }, text: string) {
     const clean = text.replace(/x-access-token:[^@]+@/g, '');
     session.logs.push(clean);
     session.listeners.forEach((listener) => {
@@ -113,6 +113,19 @@ export class GitHubService implements OnModuleInit {
         listener(clean);
       } catch {}
     });
+
+    // Save build log to disk for persistent deployment history
+    try {
+      const logsDir = path.join(process.cwd(), 'data', 'deployments');
+      if (!fs.existsSync(logsDir)) {
+        fs.mkdirSync(logsDir, { recursive: true });
+      }
+      for (const id of session.ids) {
+        if (id && !id.startsWith('deploying-')) {
+          fs.appendFileSync(path.join(logsDir, `${id}.log`), clean, 'utf8');
+        }
+      }
+    } catch {}
   }
 
   public streamBuildLogs(id: string, onData: (chunk: string) => void, onEnd: () => void): () => void {
@@ -138,6 +151,17 @@ export class GitHubService implements OnModuleInit {
     if (existing) {
       attachToSession(existing);
     } else {
+      // Check disk logs for completed past deployments
+      const logFile = path.join(process.cwd(), 'data', 'deployments', `${id}.log`);
+      if (fs.existsSync(logFile)) {
+        try {
+          const content = fs.readFileSync(logFile, 'utf8');
+          onData(content);
+          onEnd();
+          return () => {};
+        } catch {}
+      }
+
       let attempts = 0;
       const maxAttempts = 30; // 30 * 300ms = 9 seconds grace period for build session registration
 
@@ -174,10 +198,62 @@ export class GitHubService implements OnModuleInit {
 
   public getBuildLogs(id: string): { logs: string[]; status: string } {
     const session = this.findBuildSession(id);
-    if (!session) {
-      return { logs: [], status: 'not_found' };
+    if (session) {
+      return { logs: session.logs, status: session.status };
     }
-    return { logs: session.logs, status: session.status };
+    const logFile = path.join(process.cwd(), 'data', 'deployments', `${id}.log`);
+    if (fs.existsSync(logFile)) {
+      try {
+        const content = fs.readFileSync(logFile, 'utf8');
+        return { logs: [content], status: 'success' };
+      } catch {}
+    }
+    return { logs: [], status: 'not_found' };
+  }
+
+  public async getDeployHistory(serviceId: string) {
+    const history: Array<{
+      id: string;
+      status: 'building' | 'success' | 'failed';
+      createdAt: string;
+      branch: string;
+      repoName: string;
+      logsCount: number;
+    }> = [];
+
+    // 1. Get memory build sessions for this service
+    for (const session of this.buildSessions) {
+      if (session.ids.has(serviceId)) {
+        history.push({
+          id: serviceId,
+          status: session.status,
+          createdAt: new Date(session.createdAt).toISOString(),
+          branch: session.branch,
+          repoName: session.repoName,
+          logsCount: session.logs.length,
+        });
+      }
+    }
+
+    // 2. Fallback to service record metadata
+    if (history.length === 0) {
+      try {
+        const svc = await this.servicesService.getService(serviceId);
+        if (svc) {
+          const rawStatus = (svc.status as string) || '';
+          history.push({
+            id: svc.id,
+            status: rawStatus === 'failed' || rawStatus === 'error' ? 'failed' : rawStatus === 'building' ? 'building' : 'success',
+            createdAt: svc.startedAt || svc.createdAt || new Date().toISOString(),
+            branch: svc.gitBranch || svc.env?.GIT_BRANCH || 'main',
+            repoName: svc.gitRepo?.split('/').pop()?.replace(/\.git$/, '') || svc.name,
+            logsCount: 1,
+          });
+        }
+      } catch {}
+    }
+
+    return history;
   }
 
   constructor(
@@ -780,6 +856,7 @@ export class GitHubService implements OnModuleInit {
   ): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       const extraPath = [
+        '/home/blockchainbard/.local/bin',
         '/opt/homebrew/bin',
         '/Users/MAC/.docker/bin',
         '/Users/MAC/.nvm/versions/node/v24.21.0/bin',
@@ -1262,7 +1339,16 @@ export class GitHubService implements OnModuleInit {
       // If service is not registered in Docker yet (e.g. temporary canvas node or failed build), handle gracefully
     }
 
-    const repoUrl = overrides?.cloneUrl || existing?.gitRepo || existing?.env?.GIT_REPO;
+    let repoUrl = overrides?.cloneUrl || existing?.gitRepo || existing?.env?.GIT_REPO;
+    if (repoUrl && !repoUrl.startsWith('http://') && !repoUrl.startsWith('https://') && !repoUrl.startsWith('git@')) {
+      if (repoUrl.includes('/')) {
+        repoUrl = `https://github.com/${repoUrl}.git`;
+      } else if (this.cachedUser?.login) {
+        repoUrl = `https://github.com/${this.cachedUser.login}/${repoUrl}.git`;
+      } else {
+        repoUrl = `https://github.com/blockchainbard/${repoUrl}.git`;
+      }
+    }
     if (!repoUrl) {
       throw new BadRequestException(`Service "${serviceId}" is not associated with a valid Git repository URL.`);
     }
