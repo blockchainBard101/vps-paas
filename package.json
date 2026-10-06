@@ -1,0 +1,17 @@
+{
+  "name": "railway-neon-paas",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev:web",
+    "dev:web": "npm run dev --workspace=web",
+    "dev:server": "npm run start:dev --workspace=server",
+    "build": "npm run build:server && npm run build:web",
+    "build:web": "npm run build --workspace=web",
+    "build:server": "npm run build --workspace=server",
+    "lint": "npm run lint --workspaces"
+  }
+}
