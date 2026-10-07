@@ -1804,6 +1804,7 @@ export class GitHubService implements OnModuleInit {
   async deployFromGitHub(options: {
     tempId?: string;
     serviceId?: string;
+    serviceName?: string;
     repoName: string;
     branch: string;
     cloneUrl: string;
@@ -1826,9 +1827,12 @@ export class GitHubService implements OnModuleInit {
     const buildDir = path.join(buildsBaseDir, `${safeName}-${buildId}`);
 
     const cleanSubfolder = (options.subfolder || '').trim().replace(/^\/+|\/+$/g, '');
-    const subName = cleanSubfolder && cleanSubfolder !== '.'
+    const defaultSubName = cleanSubfolder && cleanSubfolder !== '.'
       ? `${safeName}-${path.basename(cleanSubfolder)}`
       : safeName;
+    const subName = options.serviceName && options.serviceName.trim()
+      ? options.serviceName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-')
+      : defaultSubName;
 
     // The stable id the UI uses for this deployment: the real service id on a
     // redeploy, or the temporary canvas node id for a brand-new deployment.

@@ -102,6 +102,7 @@ export function GitHubRepoModal({
   // Deploy configuration state
   const [branches, setBranches] = useState<string[]>(['main']);
   const [selectedBranch, setSelectedBranch] = useState('main');
+  const [customServiceName, setCustomServiceName] = useState('');
   const [subfolders, setSubfolders] = useState<DetectedSubfolder[]>([]);
   const [selectedSubfolder, setSelectedSubfolder] = useState<string>('.');
   const [customSubfolder, setCustomSubfolder] = useState<string>('');
@@ -328,6 +329,7 @@ export function GitHubRepoModal({
   // Load branches and reset subfolders when selectedRepo changes
   useEffect(() => {
     if (!selectedRepo) return;
+    setCustomServiceName(selectedRepo.name);
     setSelectedBranch(selectedRepo.defaultBranch || 'main');
     setSelectedSubfolder('.');
     setCustomSubfolder('');
@@ -455,9 +457,10 @@ export function GitHubRepoModal({
       : undefined;
 
     const cleanSubfolder = (targetSubfolder || '').trim().replace(/^\/+|\/+$/g, '');
-    const subName = cleanSubfolder && cleanSubfolder !== '.'
+    const defaultSubName = cleanSubfolder && cleanSubfolder !== '.'
       ? `${selectedRepo.name}-${cleanSubfolder.split('/').pop()}`
       : selectedRepo.name;
+    const subName = customServiceName.trim() || defaultSubName;
 
     const tempId = 'deploying-' + Date.now();
     const strategy =
@@ -509,7 +512,10 @@ export function GitHubRepoModal({
         undefined,
         undefined,
         undefined,
-        tempId
+        tempId,
+        undefined,
+        undefined,
+        customServiceName.trim() || undefined
       );
       onDeploySuccess(res.service, res.git, tempId);
     } catch (err: any) {
@@ -1017,6 +1023,20 @@ export function GitHubRepoModal({
 
                 {/* Scrollable config fields */}
                 <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5 scrollbar-thin scrollbar-thumb-zinc-800">
+
+                  {/* Service Name */}
+                  <div>
+                    <label className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider block mb-1.5">
+                      Service Name
+                    </label>
+                    <input
+                      type="text"
+                      value={customServiceName}
+                      onChange={(e) => setCustomServiceName(e.target.value)}
+                      placeholder={selectedRepo.name}
+                      className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500/60"
+                    />
+                  </div>
 
                   {/* Branch */}
                   <div>

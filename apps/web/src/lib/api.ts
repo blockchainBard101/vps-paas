@@ -637,13 +637,15 @@ export async function deployGitHubRepo(
   startCommand?: string,
   tempId?: string,
   systemPackages?: string,
-  nodeVersion?: string
+  nodeVersion?: string,
+  serviceName?: string
 ): Promise<{ service: ServiceRecord; git: any }> {
   const res = await fetch(`${API_BASE}/github/deploy`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       tempId,
+      serviceName,
       repoName,
       branch,
       cloneUrl,

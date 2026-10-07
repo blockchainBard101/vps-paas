@@ -326,6 +326,7 @@ export class GitHubController {
     @Body()
     body: {
       tempId?: string;
+      serviceName?: string;
       repoName: string;
       branch: string;
       cloneUrl: string;
