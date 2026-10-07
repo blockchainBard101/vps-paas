@@ -2277,13 +2277,12 @@ export class GitHubService implements OnModuleInit {
           (svcRepo.includes(repoFullName) || svcRepo.toLowerCase() === payload?.repository?.clone_url?.toLowerCase()) &&
           (!svcBranch || svcBranch === branch)
         ) {
-          console.log(`[GitHub Webhook] Redeploying matching service ${svc.name} (${svc.id})...`);
-          try {
-            await this.servicesService.restartService(svc.id);
-            redeployed.push(svc.name);
-          } catch (err: any) {
-            console.error(`[GitHub Webhook] Failed to restart service ${svc.name}:`, err.message);
-          }
+          console.log(`[GitHub Webhook] Triggering auto-redeploy for matching service ${svc.name} (${svc.id})...`);
+          redeployed.push(svc.name);
+          // Launch build & deployment asynchronously so GitHub webhook receives immediate 200 OK without timing out
+          this.redeployService(svc.id).catch((err: any) => {
+            console.error(`[GitHub Webhook] Failed to auto-redeploy service ${svc.name}:`, err.message);
+          });
         }
       }
 
