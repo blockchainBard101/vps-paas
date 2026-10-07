@@ -446,10 +446,12 @@ export class ServicesService implements OnModuleInit {
       const targetIp = this.systemSettingsService.getServerIp();
       for (const host of record.domains || []) {
         if (!statusMap[host]) {
+          const isWildcard = this.isCoveredByVerifiedWildcard(host);
           statusMap[host] = {
-            status: 'pending',
+            status: isWildcard ? 'verified' : 'pending',
             targetIp,
             createdAt: new Date().toISOString(),
+            verifiedAt: isWildcard ? new Date().toISOString() : undefined,
           };
         }
       }
@@ -476,6 +478,31 @@ export class ServicesService implements OnModuleInit {
 
   async restartService(id: string): Promise<ServiceRecord> {
     const service = await this.getService(id);
+    if (service.image) {
+      try {
+        return await this.deployService({
+          id: service.id,
+          name: service.name,
+          image: service.image,
+          port: service.internalPort || 3000,
+          env: service.env,
+          domains: service.domains,
+          gitRepo: service.gitRepo,
+          gitBranch: service.gitBranch,
+          subfolder: service.subfolder,
+          dockerfilePath: service.dockerfilePath,
+          buildMethod: service.buildMethod,
+          runtimeMode: service.runtimeMode,
+          installCommand: service.installCommand,
+          buildCommand: service.buildCommand,
+          startCommand: service.startCommand,
+          systemPackages: service.systemPackages,
+          nodeVersion: service.nodeVersion,
+        });
+      } catch (err: any) {
+        console.warn(`[ServicesService] Re-deploy during restart failed, falling back to container.restart(): ${err.message}`);
+      }
+    }
     const container = this.dockerService.client.getContainer(service.containerId);
     await container.restart();
     service.status = 'running';
@@ -547,10 +574,12 @@ export class ServicesService implements OnModuleInit {
     service.domains = list;
     service.domainStatus = service.domainStatus || {};
     if (!service.domainStatus[clean]) {
+      const isWildcard = this.isCoveredByVerifiedWildcard(clean);
       service.domainStatus[clean] = {
-        status: 'pending',
+        status: isWildcard ? 'verified' : 'pending',
         targetIp: this.systemSettingsService.getServerIp(),
         createdAt: new Date().toISOString(),
+        verifiedAt: isWildcard ? new Date().toISOString() : undefined,
       };
     }
     this.saveToDisk();
@@ -641,7 +670,42 @@ export class ServicesService implements OnModuleInit {
             : 'No DNS records found yet',
       },
     });
+    if (verified) {
+      await this.verifyAllDomains().catch(() => {});
+    }
     return { host, targetIp, ips, verified };
+  }
+
+  /** Determine whether a domain is covered by an already-verified base or wildcard domain. */
+  isCoveredByVerifiedWildcard(host: string): boolean {
+    const domainsConfig = this.systemSettingsService.getDomains();
+    if (domainsConfig?.domainStatus !== 'verified') return false;
+
+    const cleanHost = (host || '').trim().toLowerCase();
+    const serverDomain = (this.systemSettingsService.getServerDomain() || '').trim().toLowerCase();
+    const wildcardDomain = (this.systemSettingsService.getWildcardDomain() || '').trim().toLowerCase();
+
+    // Direct match with base domain
+    if (serverDomain && cleanHost === serverDomain) {
+      return true;
+    }
+
+    // Subdomain match against base domain: e.g. mudacle.test.walhost.xyz ends with .test.walhost.xyz
+    if (serverDomain && cleanHost.endsWith(`.${serverDomain}`)) {
+      return true;
+    }
+
+    // Subdomain match against wildcard pattern: e.g. *.test.walhost.xyz
+    if (wildcardDomain) {
+      const suffix = wildcardDomain.startsWith('*.')
+        ? wildcardDomain.slice(2)
+        : wildcardDomain.replace(/^\*/, '');
+      if (suffix && (cleanHost === suffix || cleanHost.endsWith(`.${suffix}`))) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /** Resolve the IPv4/IPv6 addresses (following a CNAME) for a hostname. */
@@ -660,6 +724,15 @@ export class ServicesService implements OnModuleInit {
         }
       } catch {}
     }
+    // Also try OS-level resolver (getaddrinfo) in case Node's internal c-ares cache or servers differ
+    if (ips.length === 0) {
+      try {
+        const lookupResult = await dns.promises.lookup(host, { all: true });
+        for (const res of lookupResult) {
+          if (res.address) ips.push(res.address);
+        }
+      } catch {}
+    }
     try {
       ips.push(...(await dns.promises.resolve6(host)));
     } catch {}
@@ -672,13 +745,25 @@ export class ServicesService implements OnModuleInit {
     service.domainStatus = service.domainStatus || {};
     await Promise.all(
       (service.domains || []).map(async (host) => {
+        const cleanHost = (host || '').trim().toLowerCase();
         const entry: DomainStatusRecord = service.domainStatus![host] || {
           status: 'pending',
           createdAt: new Date().toISOString(),
         };
         entry.targetIp = targetIp;
         entry.lastCheckedAt = new Date().toISOString();
-        const ips = await this.resolveDomainIps(host);
+
+        // 1. Inherit verification if covered by a verified wildcard or base domain
+        if (this.isCoveredByVerifiedWildcard(cleanHost)) {
+          entry.status = 'verified';
+          entry.verifiedAt = entry.verifiedAt || new Date().toISOString();
+          entry.lastError = undefined;
+          service.domainStatus![host] = entry;
+          return;
+        }
+
+        // 2. Otherwise verify via DNS resolution against target server IP
+        const ips = await this.resolveDomainIps(cleanHost);
         if (targetIp && ips.includes(targetIp)) {
           entry.status = 'verified';
           entry.verifiedAt = entry.verifiedAt || new Date().toISOString();

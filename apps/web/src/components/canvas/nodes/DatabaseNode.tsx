@@ -1,14 +1,21 @@
-'use client';
-
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { HardDrive, ExternalLink, Copy, Check, Sliders } from 'lucide-react';
+import { HardDrive, Activity, ExternalLink, Copy, Check, Sliders } from 'lucide-react';
 import { PostgresLogo, RedisLogo } from '../../icons/DatabaseLogos';
+import { fetchDatabaseMetrics, ContainerMetrics } from '@/lib/api';
 
 export function DatabaseNode({ data, selected }: { data: any; selected: boolean }) {
-  const isHealthy = data.status === 'healthy';
+  const isHealthy = data.status === 'healthy' || data.status === 'running';
   const isRedis = data.engine === 'redis' || data.name?.toLowerCase().includes('redis');
   const [copied, setCopied] = useState(false);
+  const [metrics, setMetrics] = useState<ContainerMetrics | null>(null);
+
+  useEffect(() => {
+    if (!data.id) return;
+    fetchDatabaseMetrics(data.id)
+      .then((m) => setMetrics(m))
+      .catch(() => {});
+  }, [data.id]);
 
   function handleCopyUrl(e: React.MouseEvent) {
     e.stopPropagation();
@@ -69,13 +76,16 @@ export function DatabaseNode({ data, selected }: { data: any; selected: boolean 
 
       {/* Metrics & Storage Info */}
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-zinc-400">
-        <div className="flex items-center gap-1.5 bg-zinc-950/60 p-2 rounded-md border border-zinc-800/40">
-          <HardDrive className="w-3.5 h-3.5 text-zinc-500" />
-          <span>{data.diskUsage || (isRedis ? '16MB' : '512MB')}</span>
+        <div className="flex items-center gap-1.5 bg-zinc-950/60 p-2 rounded-md border border-zinc-800/40" title="Live RAM usage">
+          <HardDrive className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+          <span className="truncate">{metrics ? metrics.memUsage.split(' / ')[0] : (isRedis ? '11 MiB' : '32 MiB')} RAM</span>
         </div>
-        <div className="flex items-center justify-between bg-zinc-950/60 p-2 rounded-md border border-zinc-800/40">
-          <span>Port:</span>
-          <span className="text-zinc-200 font-mono">{isRedis ? '6379' : '5432'}</span>
+        <div className="flex items-center justify-between bg-zinc-950/60 p-2 rounded-md border border-zinc-800/40" title="Live CPU %">
+          <span className="text-zinc-500 flex items-center gap-1">
+            <Activity className="w-3 h-3 text-zinc-500" />
+            <span>CPU:</span>
+          </span>
+          <span className="text-zinc-200 font-mono">{metrics ? metrics.cpuPercent : '0.1%'}</span>
         </div>
       </div>
 

@@ -54,6 +54,7 @@ import {
   saveGitHubOAuthConfig,
   saveGitHubToken,
   disconnectGitHub,
+  resetGitHubAppConfig,
   fetchDomainStatus,
   syncDomains,
   startCaddy,
@@ -1283,6 +1284,28 @@ export function SystemSettingsView({
                         className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold cursor-pointer"
                       >
                         Save &amp; Connect
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!confirm('Reset current GitHub App and OAuth configuration on this server?')) return;
+                          setGitConnecting(true);
+                          try {
+                            const s = await resetGitHubAppConfig();
+                            setGitStatus(s);
+                            setGitShowOAuthSetup(false);
+                            setOauthClientId('');
+                            setOauthClientSecret('');
+                          } catch (err: any) {
+                            setGitError(err.message);
+                          } finally {
+                            setGitConnecting(false);
+                          }
+                        }}
+                        disabled={gitConnecting}
+                        className="w-full py-1.5 bg-zinc-800 hover:bg-rose-950/60 hover:text-rose-300 text-zinc-400 rounded-lg text-xs font-medium cursor-pointer transition-colors"
+                      >
+                        Reset / Re-create App
                       </button>
                     </form>
                   </div>

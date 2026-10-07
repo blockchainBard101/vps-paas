@@ -13,6 +13,11 @@ import {
   Edge,
   Node,
   BackgroundVariant,
+  BaseEdge,
+  EdgeLabelRenderer,
+  getBezierPath,
+  EdgeProps,
+  EdgeChange,
 } from '@xyflow/react';
 import { ServiceNode } from './nodes/ServiceNode';
 import { DatabaseNode } from './nodes/DatabaseNode';
@@ -57,6 +62,73 @@ import {
   ArrowLeft
 } from 'lucide-react';
 
+// Custom wire edge component with an interactive disconnect button on hover / selection
+function DeletableEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+  style = {},
+  markerEnd,
+  selected,
+  data,
+}: EdgeProps) {
+  const [edgePath, labelX, labelY] = getBezierPath({
+    sourceX,
+    sourceY,
+    sourcePosition,
+    targetPosition,
+    targetX,
+    targetY,
+  });
+
+  return (
+    <>
+      <BaseEdge
+        path={edgePath}
+        markerEnd={markerEnd}
+        style={{
+          ...style,
+          stroke: selected ? '#818cf8' : (style.stroke || '#6366f1'),
+          strokeWidth: selected ? 3 : 2,
+        }}
+      />
+      <EdgeLabelRenderer>
+        <div
+          style={{
+            position: 'absolute',
+            transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
+            pointerEvents: 'all',
+          }}
+          className="nodrag nopan"
+        >
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              (data as any)?.onDelete?.(id);
+            }}
+            className={`flex items-center justify-center w-5 h-5 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-rose-400 hover:border-rose-500/60 hover:bg-rose-950/70 shadow-lg transition-all cursor-pointer ${
+              selected ? 'opacity-100 ring-2 ring-indigo-500/80 scale-110' : 'opacity-0 hover:opacity-100'
+            }`}
+            title="Disconnect connection (or press Delete)"
+          >
+            <span className="text-xs font-bold leading-none select-none">×</span>
+          </button>
+        </div>
+      </EdgeLabelRenderer>
+    </>
+  );
+}
+
+const edgeTypes = {
+  default: DeletableEdge,
+};
+
 const nodeTypes = {
   serviceNode: ServiceNode,
   databaseNode: DatabaseNode,
@@ -81,12 +153,16 @@ export function RailwayCanvas({
   const [currentProject, setCurrentProject] = useState(activeProject);
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
-  // Always-current snapshot of nodes for use inside the polling loop (the loop
-  // closure would otherwise hold stale node state).
+  // Always-current snapshots of nodes and edges for use inside polling loop & callbacks
   const nodesRef = useRef<Node[]>([]);
   useEffect(() => {
     nodesRef.current = nodes;
   }, [nodes]);
+
+  const edgesRef = useRef<Edge[]>([]);
+  useEffect(() => {
+    edgesRef.current = edges;
+  }, [edges]);
 
   // Studio and Terminal state
   const [activeStudioDb, setActiveStudioDb] = useState<{ id: string; name: string } | null>(null);
@@ -116,15 +192,21 @@ export function RailwayCanvas({
       .then((proj) => {
         if (!isMounted) return;
         if (proj.nodes && proj.nodes.length > 0) {
+          nodesRef.current = proj.nodes;
+          edgesRef.current = proj.edges || [];
           setNodes(proj.nodes);
           setEdges(proj.edges || []);
         } else {
+          nodesRef.current = [];
+          edgesRef.current = [];
           setNodes([]);
           setEdges([]);
         }
       })
       .catch(() => {
         if (!isMounted) return;
+        nodesRef.current = [];
+        edgesRef.current = [];
         setNodes([]);
         setEdges([]);
       });
@@ -299,14 +381,24 @@ export function RailwayCanvas({
             if (n.type === 'databaseNode') {
               const realDb = databases.find((d) => d.id === n.id || d.name === nodeData.name);
               if (realDb) {
-                if (nodeData.status !== 'healthy' || nodeData.connectionUrl !== realDb.connectionUrl) {
+                const desiredStatus = realDb.status === 'stopped' ? 'stopped' : 'healthy';
+                if (
+                  nodeData.status !== desiredStatus ||
+                  nodeData.connectionUrl !== realDb.connectionUrl ||
+                  nodeData.containerName !== realDb.containerName
+                ) {
                   hasChanges = true;
                   return {
                     ...n,
                     data: {
                       ...nodeData,
-                      status: 'healthy',
+                      name: realDb.name,
+                      status: desiredStatus,
                       connectionUrl: realDb.connectionUrl,
+                      containerName: realDb.containerName,
+                      dbName: realDb.dbName,
+                      user: realDb.user,
+                      password: realDb.password,
                       port: realDb.port,
                     },
                   };
@@ -318,7 +410,7 @@ export function RailwayCanvas({
           });
 
           if (hasChanges) {
-            saveProjectCanvas(currentProject, nextNodes, edges).catch(() => {});
+            saveProjectCanvas(currentProject, nextNodes, edgesRef.current).catch(() => {});
             return nextNodes;
           }
           return prevNodes;
@@ -337,7 +429,7 @@ export function RailwayCanvas({
       clearInterval(interval);
       clearTimeout(timeout);
     };
-  }, [currentProject, edges]);
+  }, [currentProject]);
 
   // Keep open service drawer in sync with updated node data
   useEffect(() => {
@@ -379,6 +471,109 @@ export function RailwayCanvas({
     }
   }, [nodes, selectedServiceForDrawer]);
 
+  // Helper to remove edges, immediately persist remaining edges to backend, and clean up env vars
+  const removeEdgesAndPersist = useCallback(
+    async (edgesToRemove: Edge[]) => {
+      if (!edgesToRemove || edgesToRemove.length === 0) return;
+      const idsToRemove = new Set(edgesToRemove.map((e) => e.id));
+
+      const remainingEdges = edgesRef.current.filter((e) => !idsToRemove.has(e.id));
+      edgesRef.current = remainingEdges;
+      setEdges(remainingEdges);
+
+      // 1. Immediately persist remaining edges to backend
+      try {
+        await saveProjectCanvas(currentProject, nodesRef.current, remainingEdges);
+      } catch (err: any) {
+        console.warn('[RailwayCanvas] Failed to persist canvas after edge removal:', err);
+      }
+
+      // 2. Unlink environment variables
+      for (const edge of edgesToRemove) {
+        const nodeA = nodesRef.current.find((n) => n.id === edge.source);
+        const nodeB = nodesRef.current.find((n) => n.id === edge.target);
+
+        const dbNode = [nodeA, nodeB].find(
+          (n) => n?.type === 'databaseNode' || (n?.data as any)?.engine || (n?.data as any)?.connectionUrl
+        );
+        const svcNode = [nodeA, nodeB].find((n) => n && n !== dbNode);
+
+        if (!dbNode || !svcNode) continue;
+        const dbData = (dbNode.data as any) || {};
+        const svcData = (svcNode.data as any) || {};
+        const isRedis = dbData.engine === 'redis' || (dbData.name || '').toLowerCase().includes('redis');
+        if (!svcData.env) continue;
+
+        const keysToRemove = isRedis
+          ? ['REDIS_URL']
+          : ['DATABASE_URL', 'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD'];
+
+        const nextEnv: Record<string, string> = { ...(svcData.env || {}) };
+        let modified = false;
+        for (const k of keysToRemove) {
+          if (nextEnv[k]) {
+            delete nextEnv[k];
+            modified = true;
+          }
+        }
+        if (modified) {
+          svcData.env = nextEnv;
+          try {
+            await updateServiceEnv(svcNode.id, nextEnv);
+            setLinkNotification(`🔌 Unlinked \${{ ${dbData.name || 'database'} }} from ${svcData.name || 'service'}`);
+            setTimeout(() => setLinkNotification(null), 3500);
+          } catch (err: any) {
+            console.warn('[RailwayCanvas] Could not update service env on unlink:', err);
+          }
+        }
+      }
+    },
+    [currentProject, setEdges]
+  );
+
+  // Directly delete an edge by ID (e.g. from the wire's delete button)
+  const deleteEdgeById = useCallback(
+    (edgeId: string) => {
+      const targetEdge = edgesRef.current.find((e) => e.id === edgeId);
+      if (targetEdge) {
+        removeEdgesAndPersist([targetEdge]);
+      } else {
+        const remainingEdges = edgesRef.current.filter((e) => e.id !== edgeId);
+        edgesRef.current = remainingEdges;
+        setEdges(remainingEdges);
+        saveProjectCanvas(currentProject, nodesRef.current, remainingEdges).catch(() => {});
+      }
+    },
+    [currentProject, removeEdgesAndPersist, setEdges]
+  );
+
+  // Handle edge change events from ReactFlow (e.g. user pressing Backspace / Delete)
+  const handleEdgesChange = useCallback(
+    (changes: EdgeChange[]) => {
+      onEdgesChange(changes);
+      const removeChanges = changes.filter((c) => c.type === 'remove');
+      if (removeChanges.length > 0) {
+        const removedIds = new Set(removeChanges.map((c: any) => c.id));
+        const removedEdges = edgesRef.current.filter((e) => removedIds.has(e.id));
+        if (removedEdges.length > 0) {
+          removeEdgesAndPersist(removedEdges);
+        } else {
+          const remainingEdges = edgesRef.current.filter((e) => !removedIds.has(e.id));
+          edgesRef.current = remainingEdges;
+          saveProjectCanvas(currentProject, nodesRef.current, remainingEdges).catch(() => {});
+        }
+      }
+    },
+    [currentProject, onEdgesChange, removeEdgesAndPersist]
+  );
+
+  const onEdgesDelete = useCallback(
+    (deletedEdges: Edge[]) => {
+      removeEdgesAndPersist(deletedEdges);
+    },
+    [removeEdgesAndPersist]
+  );
+
   // Wire linking: auto-inject DATABASE_URL or REDIS_URL
   const onConnect = useCallback(
     async (params: Connection) => {
@@ -388,38 +583,70 @@ export function RailwayCanvas({
           animated: true,
           style: { stroke: '#6366f1', strokeWidth: 2 },
         } as Edge,
-        edges
+        edgesRef.current
       );
+      edgesRef.current = newEdges;
       setEdges(newEdges);
 
-      const sourceNode = nodes.find((n) => n.id === params.source);
-      const targetNode = nodes.find((n) => n.id === params.target);
-      const sourceName = (sourceNode?.data as any)?.name || 'database';
-      const targetName = (targetNode?.data as any)?.name || 'service';
-      const engine = (sourceNode?.data as any)?.engine || 'postgres';
-      const isRedis = engine === 'redis';
+      const nodeA = nodesRef.current.find((n) => n.id === params.source);
+      const nodeB = nodesRef.current.find((n) => n.id === params.target);
 
-      const connUrl =
-        (sourceNode?.data as any)?.connectionUrl ||
-        (isRedis
-          ? `redis://default:secret@${sourceNode?.id || 'paas-redis'}:6379`
-          : `postgresql://postgres:secret@${sourceNode?.id || 'paas-pg'}:5432/railway`);
+      // Support dragging in either direction (DB -> Service OR Service -> DB)
+      const dbNode = [nodeA, nodeB].find(
+        (n) => n?.type === 'databaseNode' || (n?.data as any)?.engine || (n?.data as any)?.connectionUrl
+      );
+      const svcNode = [nodeA, nodeB].find((n) => n && n !== dbNode);
 
-      const envKey = isRedis ? 'REDIS_URL' : 'DATABASE_URL';
-
-      if (targetNode?.id) {
-        try {
-          await updateServiceEnv(targetNode.id, { [envKey]: connUrl });
-        } catch {}
+      if (!dbNode || !svcNode) {
+        saveProjectCanvas(currentProject, nodesRef.current, newEdges).catch(() => {});
+        return;
       }
 
-      setLinkNotification(`✨ Injected \${{ ${sourceName}.${envKey} }} into ${targetName}!`);
+      const dbData = (dbNode.data as any) || {};
+      const svcData = (svcNode.data as any) || {};
+      const dbName = dbData.name || 'database';
+      const svcName = svcData.name || 'service';
+      const engine = dbData.engine || 'postgres';
+      const isRedis = engine === 'redis' || dbName.toLowerCase().includes('redis');
+
+      const connUrl =
+        dbData.connectionUrl ||
+        (isRedis
+          ? `redis://default:${dbData.password || 'secret'}@${dbData.containerName || `paas-redis-${dbNode.id}`}:6379`
+          : `postgresql://${dbData.user || 'postgres'}:${dbData.password || 'secret'}@${dbData.containerName || `paas-pg-${dbNode.id}`}:5432/${dbData.dbName || 'railway'}`);
+
+      const envUpdates: Record<string, string> = {};
+      if (isRedis) {
+        envUpdates['REDIS_URL'] = connUrl;
+      } else {
+        envUpdates['DATABASE_URL'] = connUrl;
+        if (dbData.containerName) envUpdates['PGHOST'] = dbData.containerName;
+        envUpdates['PGPORT'] = '5432';
+        if (dbData.dbName) envUpdates['PGDATABASE'] = dbData.dbName;
+        if (dbData.user) envUpdates['PGUSER'] = dbData.user;
+        if (dbData.password) envUpdates['PGPASSWORD'] = dbData.password;
+      }
+
+      // Merge with existing service environment variables
+      const existingEnv = svcData.env || {};
+      const mergedEnv = { ...existingEnv, ...envUpdates };
+      svcData.env = mergedEnv;
+
+      if (svcNode.id) {
+        try {
+          await updateServiceEnv(svcNode.id, mergedEnv);
+        } catch (err: any) {
+          console.warn('Could not persist env to service:', err.message);
+        }
+      }
+
+      setLinkNotification(`✨ Injected \${{ ${dbName}.${isRedis ? 'REDIS_URL' : 'DATABASE_URL'} }} into ${svcName}!`);
       setTimeout(() => setLinkNotification(null), 3500);
 
       // Persist canvas
-      saveProjectCanvas(currentProject, nodes, newEdges).catch(() => {});
+      saveProjectCanvas(currentProject, nodesRef.current, newEdges).catch(() => {});
     },
-    [nodes, edges, currentProject, setEdges]
+    [currentProject, setEdges]
   );
 
   async function addNewPostgres(customName?: string) {
@@ -456,9 +683,11 @@ export function RailwayCanvas({
           : n
       );
       setNodes(updatedNodes);
-      saveProjectCanvas(currentProject, updatedNodes, edges).catch(() => {});
+      nodesRef.current = updatedNodes;
+      saveProjectCanvas(currentProject, updatedNodes, edgesRef.current).catch(() => {});
     } catch {
-      saveProjectCanvas(currentProject, nextNodes, edges).catch(() => {});
+      nodesRef.current = nextNodes;
+      saveProjectCanvas(currentProject, nextNodes, edgesRef.current).catch(() => {});
     }
   }
 
@@ -479,6 +708,7 @@ export function RailwayCanvas({
     };
     const nextNodes = [...nodes, newNode];
     setNodes(nextNodes);
+    nodesRef.current = nextNodes;
 
     try {
       const realRedis = await provisionRedis(redisName);
@@ -497,9 +727,11 @@ export function RailwayCanvas({
           : n
       );
       setNodes(updatedNodes);
-      saveProjectCanvas(currentProject, updatedNodes, edges).catch(() => {});
+      nodesRef.current = updatedNodes;
+      saveProjectCanvas(currentProject, updatedNodes, edgesRef.current).catch(() => {});
     } catch {
-      saveProjectCanvas(currentProject, nextNodes, edges).catch(() => {});
+      nodesRef.current = nextNodes;
+      saveProjectCanvas(currentProject, nextNodes, edgesRef.current).catch(() => {});
     }
   }
 
@@ -507,11 +739,13 @@ export function RailwayCanvas({
     setIsDeletingDb(true);
     try {
       await deleteDatabase(id);
-      const nextNodes = nodes.filter((n) => n.id !== id);
-      const nextEdges = edges.filter((e) => e.source !== id && e.target !== id);
+      const nextNodes = nodesRef.current.filter((n) => n.id !== id);
+      const nextEdges = edgesRef.current.filter((e) => e.source !== id && e.target !== id);
 
       setNodes(nextNodes);
       setEdges(nextEdges);
+      nodesRef.current = nextNodes;
+      edgesRef.current = nextEdges;
 
       if (activeStudioDb?.id === id) setActiveStudioDb(null);
       if (activeSettingsDb?.id === id) setActiveSettingsDb(null);
@@ -670,10 +904,19 @@ export function RailwayCanvas({
               },
             };
           })}
-          edges={edges}
+          edges={edges.map((e) => ({
+            ...e,
+            data: {
+              ...(e.data || {}),
+              onDelete: deleteEdgeById,
+            },
+          }))}
+          edgeTypes={edgeTypes}
           onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
+          onEdgesChange={handleEdgesChange}
+          onEdgesDelete={onEdgesDelete}
           onConnect={onConnect}
+          deleteKeyCode={['Backspace', 'Delete']}
           onNodeClick={(_event: React.MouseEvent, node: Node) => {
             const nodeData = (node.data || {}) as Record<string, any>;
             if (node.type === 'serviceNode') {
@@ -802,10 +1045,12 @@ export function RailwayCanvas({
               : undefined
           }
           onDatabaseDeleted={(deletedId) => {
-            const nextNodes = nodes.filter((n) => n.id !== deletedId);
-            const nextEdges = edges.filter((e) => e.source !== deletedId && e.target !== deletedId);
+            const nextNodes = nodesRef.current.filter((n) => n.id !== deletedId);
+            const nextEdges = edgesRef.current.filter((e) => e.source !== deletedId && e.target !== deletedId);
             setNodes(nextNodes);
             setEdges(nextEdges);
+            nodesRef.current = nextNodes;
+            edgesRef.current = nextEdges;
             setActiveSettingsDb(null);
             saveProjectCanvas(currentProject, nextNodes, nextEdges).catch(() => {});
             setLinkNotification(`🗑️ Deleted database "${activeSettingsDb.name}"`);
@@ -867,7 +1112,8 @@ export function RailwayCanvas({
               n.id === tempId ? { ...n, id: realSvc.id, data: { ...n.data, name: realSvc.name, port: realSvc.port || port || 80 } } : n
             );
             setNodes(updatedNodes);
-            saveProjectCanvas(currentProject, updatedNodes, edges).catch(() => {});
+            nodesRef.current = updatedNodes;
+            saveProjectCanvas(currentProject, updatedNodes, edgesRef.current).catch(() => {});
             setLinkNotification(`🚀 Deployed Docker image ${image} as "${svcName}"!`);
             setTimeout(() => setLinkNotification(null), 4000);
           } catch (err: any) {
@@ -925,7 +1171,8 @@ export function RailwayCanvas({
           };
           const nextNodes = [...nodes, newNode];
           setNodes(nextNodes);
-          saveProjectCanvas(currentProject, nextNodes, edges).catch(() => {});
+          nodesRef.current = nextNodes;
+          saveProjectCanvas(currentProject, nextNodes, edgesRef.current).catch(() => {});
           setLinkNotification(`⚙️ Building ${info.repoName} (${info.branch})...`);
         }}
         onDeploySuccess={(service, gitInfo, tempId) => {
@@ -959,7 +1206,8 @@ export function RailwayCanvas({
               },
             };
             const nextNodes = [...filtered, newNode];
-            saveProjectCanvas(currentProject, nextNodes, edges).catch(() => {});
+            nodesRef.current = nextNodes;
+            saveProjectCanvas(currentProject, nextNodes, edgesRef.current).catch(() => {});
             return nextNodes;
           });
           setLinkNotification(`🚀 Deployed ${gitInfo.repoName} (${gitInfo.branch}) successfully!`);
@@ -973,7 +1221,8 @@ export function RailwayCanvas({
                 ? { ...n, data: { ...n.data, status: 'failed', errorMessage: errorMsg } }
                 : n
             );
-            saveProjectCanvas(currentProject, updated, edges).catch(() => {});
+            nodesRef.current = updated;
+            saveProjectCanvas(currentProject, updated, edgesRef.current).catch(() => {});
             return updated;
           });
           setLinkNotification(`❌ Deployment of ${name} failed — check build logs.`);
@@ -988,17 +1237,20 @@ export function RailwayCanvas({
           isOpen={true}
           onClose={() => setSelectedServiceForDrawer(null)}
           onServiceUpdated={(updated) => {
-            const nextNodes = nodes.map((n) =>
+            const nextNodes = nodesRef.current.map((n) =>
               n.id === updated.id ? { ...n, data: { ...n.data, ...updated } } : n
             );
             setNodes(nextNodes);
-            saveProjectCanvas(currentProject, nextNodes, edges).catch(() => {});
+            nodesRef.current = nextNodes;
+            saveProjectCanvas(currentProject, nextNodes, edgesRef.current).catch(() => {});
           }}
           onServiceDeleted={(id) => {
-            const nextNodes = nodes.filter((n) => n.id !== id);
-            const nextEdges = edges.filter((e) => e.source !== id && e.target !== id);
+            const nextNodes = nodesRef.current.filter((n) => n.id !== id);
+            const nextEdges = edgesRef.current.filter((e) => e.source !== id && e.target !== id);
             setNodes(nextNodes);
             setEdges(nextEdges);
+            nodesRef.current = nextNodes;
+            edgesRef.current = nextEdges;
             setSelectedServiceForDrawer(null);
             saveProjectCanvas(currentProject, nextNodes, nextEdges).catch(() => {});
           }}

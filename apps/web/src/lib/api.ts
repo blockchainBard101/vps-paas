@@ -42,6 +42,7 @@ export interface DatabaseRecord {
   host: string;
   port: number;
   connectionUrl: string;
+  status?: 'running' | 'stopped' | 'starting';
   backupConfig?: S3BackupConfig;
 }
 
@@ -92,6 +93,34 @@ export async function provisionRedis(name = 'production-redis'): Promise<Databas
   return res.json();
 }
 
+export async function startDatabase(id: string): Promise<DatabaseRecord> {
+  const res = await fetch(`${API_BASE}/databases/${id}/start`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to start database');
+  return res.json();
+}
+
+export async function stopDatabase(id: string): Promise<DatabaseRecord> {
+  const res = await fetch(`${API_BASE}/databases/${id}/stop`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to stop database');
+  return res.json();
+}
+
+export async function restartDatabase(id: string): Promise<DatabaseRecord> {
+  const res = await fetch(`${API_BASE}/databases/${id}/restart`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to restart database');
+  return res.json();
+}
+
+export async function fetchDatabaseHealth(id: string): Promise<{ status: 'healthy' | 'unhealthy' | 'stopped'; latencyMs?: number; error?: string }> {
+  const res = await fetch(`${API_BASE}/databases/${id}/health`);
+  if (!res.ok) throw new Error('Failed to fetch database health');
+  return res.json();
+}
+
+export function getDatabaseBackupDownloadUrl(databaseId: string, backupId: string): string {
+  return `${API_BASE}/databases/${databaseId}/backups/${backupId}/download`;
+}
+
 export async function fetchDatabaseBackupConfig(databaseId: string): Promise<S3BackupConfig> {
   const res = await fetch(`${API_BASE}/databases/${databaseId}/backup/config`);
   if (!res.ok) throw new Error('Failed to fetch S3 backup configuration');
@@ -109,6 +138,22 @@ export async function updateDatabaseBackupConfig(
   });
   if (!res.ok) throw new Error('Failed to save S3 backup configuration');
   return res.json();
+}
+
+export async function testDatabaseBackupS3(
+  databaseId: string,
+  partial?: Partial<S3BackupConfig>
+): Promise<{ success: boolean; message: string }> {
+  const res = await fetch(`${API_BASE}/databases/${databaseId}/backup/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(partial || {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.message || 'Failed to connect to S3 bucket');
+  }
+  return data;
 }
 
 export async function fetchDatabaseBackups(databaseId: string): Promise<BackupSnapshot[]> {
@@ -133,6 +178,30 @@ export async function restoreDatabaseBackup(
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to restore database from backup');
+  return res.json();
+}
+
+export interface ContainerMetrics {
+  memUsage: string;
+  memPercent: string;
+  cpuPercent: string;
+  pids: number;
+}
+
+export async function fetchDatabaseMetrics(databaseId: string): Promise<ContainerMetrics> {
+  const res = await fetch(`${API_BASE}/databases/${databaseId}/metrics`);
+  if (!res.ok) throw new Error('Failed to fetch database metrics');
+  return res.json();
+}
+
+export async function deleteDatabaseBackup(
+  databaseId: string,
+  backupId: string
+): Promise<{ success: boolean; message: string }> {
+  const res = await fetch(`${API_BASE}/databases/${databaseId}/backups/${backupId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete backup snapshot');
   return res.json();
 }
 
@@ -227,7 +296,7 @@ export async function insertTableRow(
 
 export async function createDatabaseBackup(
   serviceId: string
-): Promise<{ filename: string; sizeBytes: number; createdAt: string }> {
+): Promise<BackupSnapshot> {
   const res = await fetch(`${API_BASE}/databases/${serviceId}/backup`, {
     method: 'POST',
   });
@@ -443,6 +512,14 @@ export async function disconnectGitHub(): Promise<GitHubStatus> {
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to disconnect GitHub account');
+  return res.json();
+}
+
+export async function resetGitHubAppConfig(): Promise<GitHubStatus> {
+  const res = await fetch(`${API_BASE}/github/oauth/config`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to reset GitHub App configuration');
   return res.json();
 }
 

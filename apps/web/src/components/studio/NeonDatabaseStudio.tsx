@@ -17,7 +17,8 @@ import {
   X,
   FileCode,
   TableProperties,
-  Download
+  Download,
+  Upload,
 } from 'lucide-react';
 import {
   introspectDatabase,
@@ -25,7 +26,8 @@ import {
   updateTableCell,
   executeSqlQuery,
   insertTableRow,
-  createDatabaseBackup
+  createDatabaseBackup,
+  getDatabaseBackupDownloadUrl,
 } from '@/lib/api';
 import { PostgresLogo } from '../icons/DatabaseLogos';
 
@@ -43,6 +45,81 @@ export interface TableSummary {
   estimatedRows: number;
   columns: ColumnSchema[];
 }
+
+const MIGRATION_TEMPLATES: Record<string, string> = {
+  auth: `-- 1. User Authentication & Session Schema
+CREATE TABLE IF NOT EXISTS users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email VARCHAR(255) UNIQUE NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  full_name VARCHAR(100),
+  role VARCHAR(50) DEFAULT 'USER',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token VARCHAR(255) UNIQUE NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+`,
+  ecommerce: `-- 2. E-Commerce & Catalog Schema
+CREATE TABLE IF NOT EXISTS products (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title VARCHAR(255) NOT NULL,
+  sku VARCHAR(100) UNIQUE NOT NULL,
+  price_cents INT NOT NULL,
+  inventory_count INT DEFAULT 0,
+  is_published BOOLEAN DEFAULT true,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_email VARCHAR(255) NOT NULL,
+  total_cents INT NOT NULL,
+  status VARCHAR(50) DEFAULT 'PENDING',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS order_items (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id UUID REFERENCES orders(id) ON DELETE CASCADE,
+  product_id UUID REFERENCES products(id),
+  quantity INT DEFAULT 1,
+  unit_price_cents INT NOT NULL
+);
+`,
+  blog: `-- 3. Blog & CMS Schema
+CREATE TABLE IF NOT EXISTS categories (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) UNIQUE NOT NULL,
+  slug VARCHAR(100) UNIQUE NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS posts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  category_id INT REFERENCES categories(id) ON DELETE SET NULL,
+  title VARCHAR(255) NOT NULL,
+  slug VARCHAR(255) UNIQUE NOT NULL,
+  content TEXT NOT NULL,
+  published_at TIMESTAMPTZ DEFAULT NOW(),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+`,
+  seed_users: `-- 4. Seed Mock Data
+INSERT INTO users (email, password_hash, full_name, role) VALUES
+  ('admin@walhost.xyz', '$2a$12$eX4mpleH4sh...', 'Platform Administrator', 'ADMIN'),
+  ('dev@walhost.xyz', '$2a$12$eX4mpleH4sh...', 'Lead Engineer', 'DEVELOPER'),
+  ('alice@example.com', '$2a$12$eX4mpleH4sh...', 'Alice Smith', 'USER')
+ON CONFLICT (email) DO NOTHING;
+`,
+};
 
 interface NeonDatabaseStudioProps {
   databaseId?: string;
@@ -162,12 +239,40 @@ export function NeonDatabaseStudio({
         if (realTables && realTables.length > 0) {
           setTables(realTables);
           setSelectedTable(realTables[0]);
+        } else {
+          setTables([]);
+          setSelectedTable(null as any);
+          setRows([]);
         }
       })
       .catch(() => {
         // Fallback to sample schema
       });
   }, [databaseId]);
+
+  function exportToCsv() {
+    if (!selectedTable || rows.length === 0) return;
+    const headers = selectedTable.columns.map((c) => c.name);
+    const csvRows = [
+      headers.join(','),
+      ...rows.map((r) =>
+        headers
+          .map((h) => {
+            const val = r[h] !== undefined && r[h] !== null ? String(r[h]) : '';
+            return `"${val.replace(/"/g, '""')}"`;
+          })
+          .join(',')
+      ),
+    ];
+    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `${selectedTable.name}-${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
 
   // Fetch live table rows when selectedTable changes
   useEffect(() => {
@@ -204,6 +309,21 @@ export function NeonDatabaseStudio({
     setTimeout(() => setCellEditSuccess(null), 2000);
   }
 
+  function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const content = ev.target?.result as string;
+      if (content) {
+        setSqlQuery(content);
+        setActiveTab('sql');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }
+
   async function handleRunSql() {
     setLoading(true);
     const start = performance.now();
@@ -213,6 +333,20 @@ export function NeonDatabaseStudio({
         const res = await executeSqlQuery(databaseId, sqlQuery);
         setSqlResult(res);
         setLoading(false);
+
+        // Auto-refresh tables list if a DDL migration ran
+        const upper = sqlQuery.toUpperCase();
+        if (upper.includes('CREATE ') || upper.includes('DROP ') || upper.includes('ALTER ') || upper.includes('TRUNCATE ')) {
+          introspectDatabase(databaseId).then((refreshed) => {
+            if (refreshed && refreshed.length > 0) {
+              setTables(refreshed);
+              setSelectedTable(refreshed[0]);
+            } else {
+              setTables([]);
+              setSelectedTable(null as any);
+            }
+          }).catch(() => {});
+        }
         return;
       } catch (err: any) {
         setSqlResult({
@@ -296,6 +430,14 @@ export function NeonDatabaseStudio({
                 try {
                   const b = await createDatabaseBackup(databaseId);
                   setBackupNotice(`Snapshot: ${b.filename} (${Math.round(b.sizeBytes / 1024)} KB)`);
+                  // Trigger direct download of the generated SQL dump
+                  const downloadUrl = getDatabaseBackupDownloadUrl(databaseId, b.id);
+                  const a = document.createElement('a');
+                  a.href = downloadUrl;
+                  a.download = b.filename;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
                   setTimeout(() => setBackupNotice(null), 4000);
                 } catch (e: any) {
                   alert(`Backup error: ${e.message}`);
@@ -308,7 +450,7 @@ export function NeonDatabaseStudio({
             className="px-2.5 py-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 rounded-lg text-xs font-mono flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             <Download className="w-3.5 h-3.5 text-indigo-400" />
-            <span>Backup DB</span>
+            <span>Backup & Download</span>
           </button>
 
           {onClose && (
@@ -375,6 +517,45 @@ export function NeonDatabaseStudio({
         {/* Viewport: Grid or SQL Runner */}
         <div className="flex-1 flex flex-col overflow-hidden bg-zinc-950 p-4">
           {activeTab === 'grid' ? (
+            !selectedTable || tables.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-center p-8 border border-dashed border-zinc-800/80 rounded-2xl bg-zinc-900/10">
+                <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mb-4 shadow-lg shadow-indigo-500/10">
+                  <Database className="w-6 h-6" />
+                </div>
+                <h3 className="text-sm font-semibold text-zinc-200 mb-1">No Tables Created Yet</h3>
+                <p className="text-xs text-zinc-400 max-w-sm mb-6 leading-relaxed font-mono">
+                  This PostgreSQL database is live and running. Create your first table using raw SQL or quick templates.
+                </p>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => {
+                      setSqlQuery(`CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email VARCHAR(255) NOT NULL UNIQUE,
+  full_name VARCHAR(100),
+  role VARCHAR(50) DEFAULT 'USER',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO users (email, full_name, role) VALUES 
+('alice@example.com', 'Alice Chen', 'ADMIN'),
+('bob@example.com', 'Bob Smith', 'USER');`);
+                      setActiveTab('sql');
+                    }}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 shadow-lg shadow-indigo-600/30 transition-all cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Create Sample Table via SQL</span>
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('sql')}
+                    className="px-4 py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 rounded-xl text-xs font-mono transition-colors cursor-pointer"
+                  >
+                    Open Empty SQL Editor
+                  </button>
+                </div>
+              </div>
+            ) : (
             <div className="h-full flex flex-col space-y-3">
               {/* Table Action Bar */}
               <div className="flex items-center justify-between">
@@ -386,6 +567,15 @@ export function NeonDatabaseStudio({
                 </div>
 
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={exportToCsv}
+                    className="px-3 py-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 rounded-lg text-xs font-mono flex items-center gap-1.5 transition-colors cursor-pointer"
+                    title="Export table data as CSV"
+                  >
+                    <Download className="w-3.5 h-3.5 text-zinc-400" />
+                    <span>Export CSV</span>
+                  </button>
+
                   <button
                     onClick={async () => {
                       const newRow = {
@@ -462,23 +652,51 @@ export function NeonDatabaseStudio({
                 <span>Auto-commit: ACTIVE</span>
               </div>
             </div>
+            )
           ) : (
             /* Monaco SQL Runner Tab */
             <div className="h-full flex flex-col space-y-4">
               <div className="flex-1 flex flex-col space-y-3">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="text-xs text-zinc-400 font-mono flex items-center gap-2">
                     <FileCode className="w-4 h-4 text-indigo-400" />
                     <span>Monaco Query Runner (PostgreSQL)</span>
                   </div>
-                  <button
-                    onClick={handleRunSql}
-                    disabled={loading}
-                    className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer shadow-lg shadow-indigo-600/20"
-                  >
-                    <Play className="w-3.5 h-3.5 fill-current" />
-                    <span>{loading ? 'Running...' : 'Execute Query (Cmd+Enter)'}</span>
-                  </button>
+
+                  <div className="flex items-center gap-2">
+                    {/* Migration & Seed Templates Dropdown */}
+                    <select
+                      onChange={(e) => {
+                        if (e.target.value && MIGRATION_TEMPLATES[e.target.value]) {
+                          setSqlQuery(MIGRATION_TEMPLATES[e.target.value]);
+                          e.target.value = '';
+                        }
+                      }}
+                      className="bg-zinc-900 border border-zinc-800 text-zinc-300 text-xs rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-indigo-500 font-mono cursor-pointer"
+                    >
+                      <option value="">Insert Migration / Seed Template...</option>
+                      <option value="auth">Template: Auth & Users Schema</option>
+                      <option value="ecommerce">Template: E-Commerce & Catalog</option>
+                      <option value="blog">Template: Blog & Content CMS</option>
+                      <option value="seed_users">Seed: Mock Users & Admin Data</option>
+                    </select>
+
+                    {/* Upload .sql file */}
+                    <label className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white rounded-lg text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors">
+                      <Upload className="w-3.5 h-3.5 text-zinc-400" />
+                      <span>Load .sql</span>
+                      <input type="file" accept=".sql" className="hidden" onChange={handleFileUpload} />
+                    </label>
+
+                    <button
+                      onClick={handleRunSql}
+                      disabled={loading}
+                      className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer shadow-lg shadow-indigo-600/20"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      <span>{loading ? 'Running...' : 'Execute (Cmd+Enter)'}</span>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="h-60 border border-zinc-800 rounded-xl overflow-hidden bg-[#1e1e1e]">

@@ -31,10 +31,13 @@ import {
 import {
   fetchDatabaseBackupConfig,
   updateDatabaseBackupConfig,
+  testDatabaseBackupS3,
   fetchDatabaseBackups,
   triggerDatabaseBackup,
   restoreDatabaseBackup,
+  deleteDatabaseBackup,
   deleteDatabase,
+  getDatabaseBackupDownloadUrl,
   S3BackupConfig,
   BackupSnapshot,
 } from '@/lib/api';
@@ -87,6 +90,8 @@ export function DatabaseSettingsModal({
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isBackingUp, setIsBackingUp] = useState(false);
+  const [isTesting, setIsTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isRestoringId, setIsRestoringId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -96,6 +101,45 @@ export function DatabaseSettingsModal({
 
   // Restore confirmation inline
   const [confirmRestoreSnap, setConfirmRestoreSnap] = useState<BackupSnapshot | null>(null);
+  const [isDeletingBackupId, setIsDeletingBackupId] = useState<string | null>(null);
+
+  async function handleDeleteBackup(snapshot: BackupSnapshot) {
+    if (!confirm(`Are you sure you want to permanently delete snapshot ${snapshot.filename}?`)) {
+      return;
+    }
+    setIsDeletingBackupId(snapshot.id);
+    try {
+      await deleteDatabaseBackup(databaseId, snapshot.id);
+      setSnapshots((prev) => prev.filter((s) => s.id !== snapshot.id));
+      setNotice(`Deleted snapshot ${snapshot.filename}`);
+      setTimeout(() => setNotice(null), 3000);
+    } catch (err: any) {
+      setNotice(`Delete failed: ${err.message}`);
+    } finally {
+      setIsDeletingBackupId(null);
+    }
+  }
+
+  async function handleTestConnection() {
+    setIsTesting(true);
+    setTestResult(null);
+    try {
+      const res = await testDatabaseBackupS3(databaseId, {
+        enabled: true,
+        endpoint,
+        bucket,
+        region,
+        accessKeyId,
+        secretAccessKey,
+        prefix,
+      });
+      setTestResult({ success: true, message: res.message || 'Bucket connected successfully!' });
+    } catch (err: any) {
+      setTestResult({ success: false, message: err.message || 'S3 connection test failed' });
+    } finally {
+      setIsTesting(false);
+    }
+  }
 
   useEffect(() => {
     if (!isOpen) return;
@@ -467,6 +511,66 @@ export function DatabaseSettingsModal({
                       </label>
                     </div>
 
+                    {/* Provider Quick Presets */}
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] font-mono text-zinc-400 flex items-center justify-between">
+                        <span>Provider Quick Presets:</span>
+                        <span className="text-[10px] text-zinc-500">Auto-fills endpoint & region</span>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEndpoint('https://s3.us-east-1.amazonaws.com');
+                            setRegion('us-east-1');
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-zinc-300 font-mono transition-colors cursor-pointer"
+                        >
+                          AWS S3
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEndpoint('https://<account_id>.r2.cloudflarestorage.com');
+                            setRegion('auto');
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-amber-300/90 font-mono transition-colors cursor-pointer"
+                        >
+                          Cloudflare R2
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEndpoint('https://s3.us-east-1.wasabisys.com');
+                            setRegion('us-east-1');
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-emerald-300/90 font-mono transition-colors cursor-pointer"
+                        >
+                          Wasabi
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEndpoint('http://localhost:9000');
+                            setRegion('us-east-1');
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-rose-300/90 font-mono transition-colors cursor-pointer"
+                        >
+                          MinIO
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEndpoint('https://nyc3.digitaloceanspaces.com');
+                            setRegion('nyc3');
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-cyan-300/90 font-mono transition-colors cursor-pointer"
+                        >
+                          DO Spaces
+                        </button>
+                      </div>
+                    </div>
+
                     {/* Endpoint & Bucket Inputs */}
                     <div className="grid grid-cols-2 gap-4">
                       <div>
@@ -569,8 +673,31 @@ export function DatabaseSettingsModal({
                       </div>
                     </div>
 
+                    {/* Test Connection Result Feedback */}
+                    {testResult && (
+                      <div
+                        className={`p-3 rounded-xl border text-xs font-mono flex items-start gap-2.5 animate-in fade-in ${
+                          testResult.success
+                            ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
+                            : 'bg-rose-950/30 border-rose-500/40 text-rose-300'
+                        }`}
+                      >
+                        {testResult.success ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                        )}
+                        <div className="flex-1 leading-relaxed">
+                          <span className="font-semibold block">
+                            {testResult.success ? 'S3 Connection Verified' : 'Connection Failed'}
+                          </span>
+                          <span className="text-[11px] opacity-90 break-all">{testResult.message}</span>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Save Button Row */}
-                    <div className="pt-3 border-t border-zinc-800 flex items-center justify-between">
+                    <div className="pt-3 border-t border-zinc-800 flex flex-wrap items-center justify-between gap-2">
                       <button
                         type="button"
                         onClick={handleTriggerBackup}
@@ -581,13 +708,25 @@ export function DatabaseSettingsModal({
                         <span>{isBackingUp ? 'Dumping & Uploading...' : 'Backup to S3 Now'}</span>
                       </button>
 
-                      <button
-                        type="submit"
-                        disabled={isSaving}
-                        className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold shadow-lg shadow-indigo-600/30 transition-all cursor-pointer"
-                      >
-                        {isSaving ? 'Saving S3 Settings...' : 'Save Configuration'}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleTestConnection}
+                          disabled={isTesting}
+                          className="px-3.5 py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 rounded-xl text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <Radio className={`w-3.5 h-3.5 text-indigo-400 ${isTesting ? 'animate-pulse' : ''}`} />
+                          <span>{isTesting ? 'Testing Bucket...' : 'Test Connection'}</span>
+                        </button>
+
+                        <button
+                          type="submit"
+                          disabled={isSaving}
+                          className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold shadow-lg shadow-indigo-600/30 transition-all cursor-pointer"
+                        >
+                          {isSaving ? 'Saving S3 Settings...' : 'Save Configuration'}
+                        </button>
+                      </div>
                     </div>
                   </form>
                 )}
@@ -673,6 +812,15 @@ export function DatabaseSettingsModal({
                             </div>
 
                             <div className="flex items-center gap-2 shrink-0">
+                              <a
+                                href={getDatabaseBackupDownloadUrl(databaseId, snap.id)}
+                                download={snap.filename}
+                                className="p-1.5 text-zinc-400 hover:text-indigo-400 hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
+                                title="Download backup file"
+                              >
+                                <Download className="w-3.5 h-3.5" />
+                              </a>
+
                               <button
                                 onClick={() => {
                                   navigator.clipboard?.writeText(snap.s3Url);
@@ -696,6 +844,19 @@ export function DatabaseSettingsModal({
                                   }`}
                                 />
                                 <span>{isRestoringId === snap.id ? 'Restoring...' : 'Restore'}</span>
+                              </button>
+
+                              <button
+                                onClick={() => handleDeleteBackup(snap)}
+                                disabled={isDeletingBackupId === snap.id}
+                                className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-950/30 rounded-lg transition-colors cursor-pointer"
+                                title="Delete snapshot"
+                              >
+                                <Trash2
+                                  className={`w-3.5 h-3.5 ${
+                                    isDeletingBackupId === snap.id ? 'animate-pulse text-red-400' : ''
+                                  }`}
+                                />
                               </button>
                             </div>
                           </div>

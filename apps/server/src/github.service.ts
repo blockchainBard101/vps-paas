@@ -672,6 +672,7 @@ export class GitHubService implements OnModuleInit {
       redirect_url: `${apiBase}/api/github/manifest/callback`,
       callback_urls: [
         `${apiBase}/api/github/oauth/callback`,
+        'http://localhost:4000/api/github/oauth/callback',
       ],
       setup_url: `${apiBase}/api/github/setup/callback`,
       setup_on_update: true,
@@ -729,7 +730,7 @@ export class GitHubService implements OnModuleInit {
       clientId: data.client_id,
       authorizeUrl: `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(
         data.client_id
-      )}&scope=repo,read:user,user:email,read:org&redirect_uri=${encodeURIComponent(this.getOAuthCallbackUrl())}`,
+      )}&scope=repo,read:user,user:email,read:org`,
     };
   }
 
@@ -757,9 +758,10 @@ export class GitHubService implements OnModuleInit {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
+    const redirectParam = redirectUri ? `&redirect_uri=${encodeURIComponent(redirectUri)}` : '';
     const url = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(
       this.clientId
-    )}&scope=repo,read:user,user:email,read:org&redirect_uri=${encodeURIComponent(callbackUrl)}&state=${state}`;
+    )}&scope=repo,read:user,user:email,read:org${redirectParam}&state=${state}`;
 
     return {
       configured: true,
@@ -774,6 +776,19 @@ export class GitHubService implements OnModuleInit {
   async setOAuthConfig(clientId: string, clientSecret: string): Promise<GitHubStatus> {
     this.clientId = clientId.trim();
     this.clientSecret = clientSecret.trim();
+    this.saveConfig();
+    return this.getStatus();
+  }
+
+  async resetAppConfig(): Promise<GitHubStatus> {
+    this.clientId = '';
+    this.clientSecret = '';
+    this.appId = undefined;
+    this.appSlug = undefined;
+    this.privateKey = undefined;
+    this.activeToken = null;
+    this.cachedUser = null;
+    this.connectionMethod = 'none';
     this.saveConfig();
     return this.getStatus();
   }

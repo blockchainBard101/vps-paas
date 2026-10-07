@@ -8,7 +8,11 @@ import {
   Body,
   Param,
   Query,
+  Res,
+  NotFoundException,
 } from '@nestjs/common';
+import type { Response } from 'express';
+import fs from 'node:fs';
 import { DatabaseService, S3BackupConfig } from './database.service.js';
 
 @Controller('api/databases')
@@ -28,6 +32,31 @@ export class DatabaseController {
   @Post('provision-redis')
   provisionRedis(@Body() body: { name?: string }) {
     return this.databaseService.provisionRedis(body.name);
+  }
+
+  @Post(':id/start')
+  startDatabase(@Param('id') id: string) {
+    return this.databaseService.startDatabase(id);
+  }
+
+  @Post(':id/stop')
+  stopDatabase(@Param('id') id: string) {
+    return this.databaseService.stopDatabase(id);
+  }
+
+  @Post(':id/restart')
+  restartDatabase(@Param('id') id: string) {
+    return this.databaseService.restartDatabase(id);
+  }
+
+  @Get(':id/health')
+  getHealth(@Param('id') id: string) {
+    return this.databaseService.getHealth(id);
+  }
+
+  @Get(':id/metrics')
+  getMetrics(@Param('id') id: string) {
+    return this.databaseService.getMetrics(id);
   }
 
   @Get(':id/introspect')
@@ -110,9 +139,33 @@ export class DatabaseController {
     return this.databaseService.updateBackupConfig(id, body);
   }
 
+  @Post(':id/backup/test')
+  testS3Connection(
+    @Param('id') id: string,
+    @Body() body?: Partial<S3BackupConfig>,
+  ) {
+    return this.databaseService.testS3Connection(id, body);
+  }
+
   @Get(':id/backups')
   listBackups(@Param('id') id: string) {
     return this.databaseService.listBackups(id);
+  }
+
+  @Get(':id/backups/:backupId/download')
+  downloadBackup(
+    @Param('id') id: string,
+    @Param('backupId') backupId: string,
+    @Res() res: Response,
+  ) {
+    const { path: fullPath, filename } = this.databaseService.getBackupFilePath(id, backupId);
+    if (!fs.existsSync(fullPath)) {
+      throw new NotFoundException('Backup file not found on disk');
+    }
+    const contentType = filename.endsWith('.rdb') ? 'application/octet-stream' : 'application/sql';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    fs.createReadStream(fullPath).pipe(res);
   }
 
   @Post(':id/backup')
@@ -126,6 +179,14 @@ export class DatabaseController {
     @Param('backupId') backupId: string,
   ) {
     return this.databaseService.restoreBackup(id, backupId);
+  }
+
+  @Delete(':id/backups/:backupId')
+  deleteBackup(
+    @Param('id') id: string,
+    @Param('backupId') backupId: string,
+  ) {
+    return this.databaseService.deleteBackup(id, backupId);
   }
 
   @Delete(':id')

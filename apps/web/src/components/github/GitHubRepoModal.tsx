@@ -36,6 +36,7 @@ import {
   saveGitHubOAuthConfig,
   saveGitHubToken,
   disconnectGitHub,
+  resetGitHubAppConfig,
   fetchGitHubRepos,
   fetchGitHubBranches,
   fetchPublicGitHubRepo,
@@ -672,6 +673,17 @@ export function GitHubRepoModal({
                       <span>•</span>
                       <button
                         type="button"
+                        onClick={() => {
+                          setShowConfigOAuth(!showConfigOAuth);
+                          setShowTokenInput(false);
+                        }}
+                        className="text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
+                      >
+                        {showConfigOAuth ? 'Hide App config' : 'OAuth App settings'}
+                      </button>
+                      <span>•</span>
+                      <button
+                        type="button"
                         onClick={() => setActiveTab('public')}
                         className="text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
                       >
@@ -752,6 +764,28 @@ export function GitHubRepoModal({
                           className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold cursor-pointer"
                         >
                           Save &amp; Connect
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!confirm('Reset current GitHub App and OAuth configuration on this server?')) return;
+                            setLoading(true);
+                            try {
+                              const s = await resetGitHubAppConfig();
+                              setStatus(s);
+                              setShowConfigOAuth(false);
+                              setOauthClientId('');
+                              setOauthClientSecret('');
+                            } catch (err: any) {
+                              setError(err.message);
+                            } finally {
+                              setLoading(false);
+                            }
+                          }}
+                          disabled={loading}
+                          className="w-full py-1.5 bg-zinc-800 hover:bg-rose-950/60 hover:text-rose-300 text-zinc-400 rounded-lg text-xs font-medium cursor-pointer transition-colors"
+                        >
+                          Reset / Re-create App
                         </button>
                       </form>
                     </div>

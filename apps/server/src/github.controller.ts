@@ -270,6 +270,11 @@ export class GitHubController {
     return this.githubService.setOAuthConfig(body.clientId, body.clientSecret);
   }
 
+  @Delete('oauth/config')
+  resetAppConfig() {
+    return this.githubService.resetAppConfig();
+  }
+
   @Post('disconnect')
   disconnect() {
     return this.githubService.disconnect();
