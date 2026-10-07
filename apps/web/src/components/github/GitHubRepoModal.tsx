@@ -40,11 +40,13 @@ import {
   fetchGitHubBranches,
   fetchPublicGitHubRepo,
   detectGitHubRepoBuild,
+  fetchEnvSuggestions,
   deployGitHubRepo,
   GitHubRepo,
   GitHubStatus,
   DetectedSubfolder,
   BuildDetectionResult,
+  EnvSuggestion,
 } from '@/lib/api';
 
 export interface PendingDeployInfo {
@@ -104,12 +106,19 @@ export function GitHubRepoModal({
   const [customSubfolder, setCustomSubfolder] = useState<string>('');
   const [isCustomMode, setIsCustomMode] = useState<boolean>(false);
   const [dockerfilePath, setDockerfilePath] = useState<string>('');
-  const [buildMethod, setBuildMethod] = useState<'auto' | 'railpack' | 'dockerfile'>('auto');
+  const [buildMethod, setBuildMethod] = useState<'auto' | 'railpack' | 'dockerfile' | 'slim'>('auto');
   const [port, setPort] = useState(3000);
   const [portModifiedManually, setPortModifiedManually] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [detectedBuild, setDetectedBuild] = useState<BuildDetectionResult | null>(null);
   const [isDetecting, setIsDetecting] = useState(false);
+
+  // Pre-deploy environment variables
+  const [deployEnvVars, setDeployEnvVars] = useState<{ key: string; value: string }[]>([]);
+  const [newEnvKey, setNewEnvKey] = useState('');
+  const [newEnvValue, setNewEnvValue] = useState('');
+  const [envSuggestions, setEnvSuggestions] = useState<EnvSuggestion[]>([]);
+  const [isScanningEnv, setIsScanningEnv] = useState(false);
 
   // Load initial status and repos on open
   useEffect(() => {
@@ -364,6 +373,62 @@ export function GitHubRepoModal({
       .finally(() => setIsDetecting(false));
   }, [selectedRepo, selectedBranch, activeSubfolderPath, dockerfilePath, portModifiedManually]);
 
+  // Scan the repo for env vars the project uses — only when the user clicks.
+  async function scanEnvSuggestions() {
+    if (!selectedRepo || isScanningEnv) return;
+    setIsScanningEnv(true);
+    try {
+      const sug = await fetchEnvSuggestions(
+        selectedRepo.owner,
+        selectedRepo.name,
+        selectedBranch,
+        activeSubfolderPath || undefined
+      );
+      // Only surface vars the user hasn't already added.
+      const existing = new Set(deployEnvVars.map((v) => v.key));
+      setEnvSuggestions(sug.filter((s) => !existing.has(s.key)));
+    } catch {
+      setEnvSuggestions([]);
+    } finally {
+      setIsScanningEnv(false);
+    }
+  }
+
+  function acceptSuggestion(s: EnvSuggestion) {
+    setDeployEnvVars((prev) =>
+      prev.some((v) => v.key === s.key) ? prev : [...prev, { key: s.key, value: '' }]
+    );
+    setEnvSuggestions((prev) => prev.filter((x) => x.key !== s.key));
+  }
+
+  function rejectSuggestion(key: string) {
+    setEnvSuggestions((prev) => prev.filter((x) => x.key !== key));
+  }
+
+  // Auto-scan for suggested variables when a repo/branch/subfolder is chosen.
+  useEffect(() => {
+    if (!isOpen || !selectedRepo) {
+      setEnvSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    setIsScanningEnv(true);
+    fetchEnvSuggestions(selectedRepo.owner, selectedRepo.name, selectedBranch, activeSubfolderPath || undefined)
+      .then((sug) => {
+        if (cancelled) return;
+        const existing = new Set(deployEnvVars.map((v) => v.key));
+        setEnvSuggestions(sug.filter((s) => !existing.has(s.key)));
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setIsScanningEnv(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, selectedRepo?.id, selectedBranch, activeSubfolderPath]);
+
   function handleSubfolderSelect(path: string) {
     if (path === '__custom__') {
       setIsCustomMode(true);
@@ -394,9 +459,23 @@ export function GitHubRepoModal({
       : selectedRepo.name;
 
     const tempId = 'deploying-' + Date.now();
-    const strategy = buildMethod === 'dockerfile' || detectedBuild?.hasDockerfile
-      ? 'dockerfile'
-      : 'nixpacks';
+    const strategy =
+      buildMethod === 'slim'
+        ? 'slim'
+        : buildMethod === 'dockerfile'
+        ? 'dockerfile'
+        : buildMethod === 'railpack'
+        ? 'nixpacks'
+        : detectedBuild?.hasDockerfile
+        ? 'dockerfile'
+        : 'nixpacks';
+
+    // Collect pre-deploy environment variables (ignore blank keys)
+    const envRecord: Record<string, string> = {};
+    for (const { key, value } of deployEnvVars) {
+      const k = key.trim();
+      if (k) envRecord[k] = value;
+    }
 
     // 1. Notify parent that deployment has started so it can show the service on the canvas immediately!
     onDeployStart?.({
@@ -421,7 +500,7 @@ export function GitHubRepoModal({
         selectedBranch,
         selectedRepo.cloneUrl,
         port,
-        {},
+        envRecord,
         targetSubfolder,
         dockerfilePath.trim() || undefined,
         buildMethod,
@@ -1008,8 +1087,8 @@ export function GitHubRepoModal({
                     <label className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider block mb-1.5">
                       Build Method
                     </label>
-                    <div className="grid grid-cols-3 gap-1 p-1 bg-zinc-950/80 border border-zinc-800 rounded-lg">
-                      {(['auto', 'railpack', 'dockerfile'] as const).map((m) => (
+                    <div className="grid grid-cols-4 gap-1 p-1 bg-zinc-950/80 border border-zinc-800 rounded-lg">
+                      {(['auto', 'railpack', 'dockerfile', 'slim'] as const).map((m) => (
                         <button
                           key={m}
                           type="button"
@@ -1020,7 +1099,13 @@ export function GitHubRepoModal({
                               : 'text-zinc-500 hover:text-zinc-300'
                           }`}
                         >
-                          {m === 'auto' ? 'Auto' : m === 'railpack' ? 'Nixpacks' : 'Dockerfile'}
+                          {m === 'auto'
+                            ? 'Auto'
+                            : m === 'railpack'
+                            ? 'Nixpacks'
+                            : m === 'dockerfile'
+                            ? 'Dockerfile'
+                            : 'Fast ⚡'}
                         </button>
                       ))}
                     </div>
@@ -1079,6 +1164,124 @@ export function GitHubRepoModal({
                       }}
                       className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500/60"
                     />
+                  </div>
+
+                  {/* Environment Variables */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
+                        Environment Variables
+                      </label>
+                      <button
+                        type="button"
+                        onClick={scanEnvSuggestions}
+                        disabled={!selectedRepo || isScanningEnv}
+                        className="text-[10px] font-mono text-indigo-400 hover:text-indigo-300 disabled:opacity-40 flex items-center gap-1 cursor-pointer"
+                        title="Scan the repository for variables this project uses"
+                      >
+                        {isScanningEnv ? (
+                          <>
+                            <RefreshCw className="w-3 h-3 animate-spin" /> scanning…
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-3 h-3" /> Scan repo for variables
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    {deployEnvVars.length > 0 && (
+                      <div className="space-y-1.5 mb-2">
+                        {deployEnvVars.map((v, i) => (
+                          <div key={i} className="flex items-center gap-1.5">
+                            <span className="w-1/3 text-[11px] font-mono text-indigo-300 truncate">{v.key}</span>
+                            <input
+                              value={v.value}
+                              onChange={(e) =>
+                                setDeployEnvVars(
+                                  deployEnvVars.map((x, idx) => (idx === i ? { ...x, value: e.target.value } : x))
+                                )
+                              }
+                              placeholder="value"
+                              className="flex-1 px-2 py-1 bg-zinc-950 border border-zinc-800 rounded-lg text-[11px] font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:border-indigo-500/60"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setDeployEnvVars(deployEnvVars.filter((_, idx) => idx !== i))}
+                              className="p-1 text-red-400 hover:text-red-300 hover:bg-red-950/40 rounded cursor-pointer"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        value={newEnvKey}
+                        onChange={(e) => setNewEnvKey(e.target.value)}
+                        placeholder="KEY"
+                        className="w-1/3 px-2 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-[11px] font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:border-indigo-500/60"
+                      />
+                      <input
+                        value={newEnvValue}
+                        onChange={(e) => setNewEnvValue(e.target.value)}
+                        placeholder="value"
+                        className="flex-1 px-2 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-[11px] font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:border-indigo-500/60"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!newEnvKey.trim()) return;
+                          setDeployEnvVars([...deployEnvVars, { key: newEnvKey.trim(), value: newEnvValue }]);
+                          setNewEnvKey('');
+                          setNewEnvValue('');
+                        }}
+                        disabled={!newEnvKey.trim()}
+                        className="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-zinc-200 rounded-lg text-[11px] transition-colors cursor-pointer"
+                      >
+                        Add
+                      </button>
+                    </div>
+
+                    {/* Suggested variables — accept or reject (no auto-fill) */}
+                    {envSuggestions.length > 0 && (
+                      <div className="mt-2.5 pt-2.5 border-t border-zinc-800/60">
+                        <div className="text-[10px] text-zinc-500 mb-1.5">
+                          Suggested from repo — click ✓ to add:
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {envSuggestions.map((s) => (
+                            <span
+                              key={s.key}
+                              title={s.sources?.join(', ')}
+                              className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-md bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 text-[10px] font-mono"
+                            >
+                              <span>{s.key}</span>
+                              {s.client && (
+                                <span className="text-[8px] px-1 rounded bg-cyan-500/15 text-cyan-400">public</span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => acceptSuggestion(s)}
+                                className="p-0.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/20 rounded cursor-pointer"
+                                title="Accept"
+                              >
+                                <Check className="w-3 h-3" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => rejectSuggestion(s.key)}
+                                className="p-0.5 text-red-400 hover:text-red-300 hover:bg-red-500/20 rounded cursor-pointer"
+                                title="Reject"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Summary strip */}

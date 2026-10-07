@@ -17,6 +17,7 @@ import {
   Check,
   AlertCircle,
   Copy,
+  Pencil,
   ExternalLink,
   ShieldCheck,
   Clock,
@@ -26,7 +27,9 @@ import {
   Workflow,
   Sparkles,
   Box,
+  Zap,
   Download,
+  ChevronDown,
   ArrowDown,
   Activity,
 } from 'lucide-react';
@@ -39,6 +42,10 @@ import {
   updateServiceSettings,
   redeployGitHubService,
   deployGitHubRepo,
+  addServiceDomain,
+  removeServiceDomain,
+  verifyServiceDomains,
+  fetchDomainStatus,
   ServiceRecord,
 } from '@/lib/api';
 import { DeleteServiceModal } from './DeleteServiceModal';
@@ -49,6 +56,7 @@ interface ServiceDetailDrawerProps {
     id: string;
     name: string;
     status?: string;
+    phase?: string;
     branch?: string;
     port?: number;
     internalPort?: number;
@@ -56,11 +64,25 @@ interface ServiceDetailDrawerProps {
     gitBranch?: string;
     subfolder?: string;
     dockerfilePath?: string;
-    buildMethod?: 'auto' | 'railpack' | 'dockerfile';
+    buildMethod?: 'auto' | 'railpack' | 'dockerfile' | 'slim';
     runtimeMode?: 'web' | 'worker';
     installCommand?: string;
     buildCommand?: string;
     startCommand?: string;
+    systemPackages?: string;
+    nodeVersion?: string;
+    domains?: string[];
+    domainStatus?: Record<
+      string,
+      {
+        status: 'pending' | 'verified';
+        targetIp?: string;
+        verifiedAt?: string;
+        lastCheckedAt?: string;
+        lastError?: string;
+        createdAt: string;
+      }
+    >;
     env?: Record<string, string>;
     createdAt?: string;
     startedAt?: string;
@@ -70,6 +92,31 @@ interface ServiceDetailDrawerProps {
   onClose: () => void;
   onServiceUpdated?: (updated: any) => void;
   onServiceDeleted?: (id: string) => void;
+}
+
+// Container/system environment variables (injected by Nixpacks/Docker/the PaaS)
+// that should not be presented as the user's own configuration.
+const SYSTEM_ENV_PREFIXES = ['NIX', 'NPM_', 'YARN_', 'RV_', 'PKG_', 'LD_', 'GEM_', 'PIP_', 'NGINX', 'NJS_', 'ACME_', 'DYNPKG_'];
+const SYSTEM_ENV_KEYS = new Set([
+  'PATH', 'HOME', 'PWD', 'OLDPWD', 'SHLVL', '_', 'USER', 'LOGNAME', 'TERM', 'ENV', 'CI', 'HOSTNAME',
+  'LANG', 'LC_ALL', 'LC_CTYPE', 'QTDIR', 'CPATH', 'LIBRARY_PATH', 'LD_LIBRARY_PATH',
+  'GIT_SSL_CAINFO', 'NIX_SSL_CERT_FILE', 'SOURCE_DATE_EPOCH',
+  'NODE_ENV', 'NODE_VERSION', 'YARN_VERSION', 'NPM_CONFIG_PRODUCTION',
+  'NIXPACKS_METADATA', 'NIXPACKS_PATH', 'NIXPACKS_NODE_VERSION',
+  'GIT_REPO', 'GIT_BRANCH', 'GIT_SUBFOLDER', 'GIT_DOCKERFILE_PATH', 'DOCKERFILE_PATH',
+  'BUILD_METHOD', 'RUNTIME_MODE', 'INSTALL_COMMAND', 'BUILD_COMMAND', 'START_COMMAND',
+  'PREBUILD_COMMAND', 'STATIC_OUTPUT', 'SYSTEM_PACKAGES', 'PORT',
+]);
+
+function isSystemEnvKey(key: string): boolean {
+  const u = (key || '').toUpperCase();
+  if (SYSTEM_ENV_KEYS.has(u)) return true;
+  return SYSTEM_ENV_PREFIXES.some((p) => u.startsWith(p));
+}
+
+function isMaskedKey(key: string): boolean {
+  const k = (key || '').toLowerCase();
+  return k.includes('secret') || k.includes('pass') || k.includes('token') || k.includes('key');
 }
 
 function timeAgo(isoString: string): string {
@@ -94,18 +141,132 @@ export function ServiceDetailDrawer({
   const [isRedeploying, setIsRedeploying] = useState(false);
   const isFailed = !isRedeploying && (service.status === 'failed' || service.status === 'error');
   const isBuilding = isRedeploying || service.status === 'building' || service.status === 'deploying' || service.status === 'rebuilding';
+  const phaseLabel = (() => {
+    const p = String(service.phase || '').toLowerCase();
+    if (p === 'queued') return 'QUEUED';
+    if (p === 'importing') return 'IMPORTING';
+    if (p === 'building') return 'BUILDING';
+    if (p === 'deploying') return 'DEPLOYING';
+    if (p === 'running') return 'STARTING';
+    return service.status?.toUpperCase() ?? 'BUILDING';
+  })();
   const [activeTab, setActiveTab] = useState<'deployments' | 'variables' | 'domains' | 'logs' | 'settings'>('variables');
 
   // Variables state
   const [envVars, setEnvVars] = useState<{ key: string; value: string; masked: boolean }[]>([]);
+  const [systemEnvVars, setSystemEnvVars] = useState<{ key: string; value: string; masked: boolean }[]>([]);
+  const [showSystemVars, setShowSystemVars] = useState(false);
+  const [envViewMode, setEnvViewMode] = useState<'table' | 'raw'>('table');
+  const [rawEnvText, setRawEnvText] = useState('');
+  const [isSavingRaw, setIsSavingRaw] = useState(false);
+  const [showRedeployToast, setShowRedeployToast] = useState(false);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editKey, setEditKey] = useState('');
+  const [editValue, setEditValue] = useState('');
   const [newKey, setNewKey] = useState('');
   const [newValue, setNewValue] = useState('');
   const [isSavingEnv, setIsSavingEnv] = useState(false);
   const [saveEnvNotice, setSaveEnvNotice] = useState<string | null>(null);
 
   // Domains state
-  const [customDomain, setCustomDomain] = useState('');
-  const [domainSaved, setDomainSaved] = useState(false);
+  const domainsKey = `${service.id}:${(service.domains || []).join(',')}`;
+  const [domains, setDomains] = useState<string[]>(service.domains || []);
+  const [syncedDomainsKey, setSyncedDomainsKey] = useState(domainsKey);
+  const [domainStatusMap, setDomainStatusMap] = useState<NonNullable<ServiceRecord['domainStatus']>>(
+    service.domainStatus || {},
+  );
+  const statusKey = `${service.id}:${JSON.stringify(service.domainStatus || {})}`;
+  const [syncedStatusKey, setSyncedStatusKey] = useState(statusKey);
+  const [newDomain, setNewDomain] = useState('');
+  const [isSavingDomain, setIsSavingDomain] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [domainError, setDomainError] = useState<string | null>(null);
+  const [serverIp, setServerIp] = useState('');
+
+  // Re-sync displayed state when the underlying service changes. Done during
+  // render (not in an effect) to avoid a cascading render.
+  if (syncedDomainsKey !== domainsKey) {
+    setSyncedDomainsKey(domainsKey);
+    setDomains(service.domains || []);
+  }
+  if (syncedStatusKey !== statusKey) {
+    setSyncedStatusKey(statusKey);
+    setDomainStatusMap(service.domainStatus || {});
+  }
+
+  // Fetch the server IP that custom domains must point at (shown as the DNS target).
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'domains' || serverIp) return;
+    fetchDomainStatus()
+      .then((s) => setServerIp(s.serverIp || ''))
+      .catch(() => {});
+  }, [isOpen, activeTab, serverIp]);
+
+  // Auto-verify this service's domains every 5s while the Domains tab is open,
+  // so a domain flips to "verified" shortly after DNS propagates.
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'domains') return;
+    if ((service.domains || []).length === 0) return;
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const updated = await verifyServiceDomains(service.id);
+        if (cancelled) return;
+        setDomainStatusMap(updated.domainStatus || {});
+        onServiceUpdated?.(updated);
+      } catch {}
+    };
+    const timer = setInterval(run, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, activeTab, service.id, domainsKey]);
+
+  const handleAddDomain = async () => {
+    const value = newDomain.trim();
+    if (!value) return;
+    setIsSavingDomain(true);
+    setDomainError(null);
+    try {
+      const updated = await addServiceDomain(service.id, value);
+      setDomains(updated.domains || []);
+      setDomainStatusMap(updated.domainStatus || {});
+      setNewDomain('');
+      onServiceUpdated?.(updated);
+    } catch (e: any) {
+      setDomainError(e?.message || 'Failed to add domain');
+    } finally {
+      setIsSavingDomain(false);
+    }
+  };
+
+  const handleRemoveDomain = async (domain: string) => {
+    setDomainError(null);
+    try {
+      const updated = await removeServiceDomain(service.id, domain);
+      setDomains(updated.domains || []);
+      setDomainStatusMap(updated.domainStatus || {});
+      onServiceUpdated?.(updated);
+    } catch (e: any) {
+      setDomainError(e?.message || 'Failed to remove domain');
+    }
+  };
+
+  const handleVerifyDomains = async () => {
+    setIsVerifying(true);
+    setDomainError(null);
+    try {
+      const updated = await verifyServiceDomains(service.id);
+      setDomainStatusMap(updated.domainStatus || {});
+      onServiceUpdated?.(updated);
+    } catch (e: any) {
+      setDomainError(e?.message || 'Verification failed');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
 
   // Settings state (matching modern PaaS build & runtime config)
   const [serviceName, setServiceName] = useState(service.name);
@@ -113,7 +274,7 @@ export function ServiceDetailDrawer({
   const [appPort, setAppPort] = useState<number>(
     service.port || service.internalPort || (service.env?.PORT ? parseInt(service.env.PORT, 10) : 3000)
   );
-  const [buildMethod, setBuildMethod] = useState<'auto' | 'railpack' | 'dockerfile'>(
+  const [buildMethod, setBuildMethod] = useState<'auto' | 'railpack' | 'dockerfile' | 'slim'>(
     service.buildMethod || 'auto'
   );
   const [dockerfilePath, setDockerfilePath] = useState<string>(
@@ -136,6 +297,12 @@ export function ServiceDetailDrawer({
   );
   const [subfolderPath, setSubfolderPath] = useState<string>(
     service.subfolder || service.env?.GIT_SUBFOLDER || ''
+  );
+  const [systemPackages, setSystemPackages] = useState<string>(
+    service.systemPackages || service.env?.SYSTEM_PACKAGES || ''
+  );
+  const [nodeVersion, setNodeVersion] = useState<string>(
+    service.nodeVersion || service.env?.NODE_VERSION || ''
   );
 
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -168,43 +335,27 @@ export function ServiceDetailDrawer({
     Array<{ id: string; status: 'building' | 'success' | 'failed'; createdAt: string; branch: string; repoName: string; logsCount: number }>
   >([]);
 
-  // Synchronize subtab state when building status changes
+  // When a service is actively building, surface the live Build Logs immediately
+  // so selecting a building node always shows real-time compilation output.
   useEffect(() => {
     if (isBuilding || service.id.startsWith('deploying-')) {
       setLogSubTab('build');
+      setActiveTab('logs');
     }
   }, [service.id, isBuilding]);
 
-  // Initialize env vars from service, strictly filtering out system internals
+  // Initialize env vars from service, separating user vars from container/system internals
   useEffect(() => {
-    const SYSTEM_KEYS = new Set([
-      'GIT_REPO',
-      'GIT_BRANCH',
-      'PORT',
-      'PATH',
-      'NODE_VERSION',
-      'YARN_VERSION',
-      'HOME',
-      'PWD',
-      'SHLVL',
-    ]);
-
-    if (service.env) {
-      const parsed = Object.entries(service.env)
-        .filter(([k]) => !SYSTEM_KEYS.has(k))
-        .map(([k, v]) => ({
-          key: k,
-          value: v,
-          masked:
-            k.toLowerCase().includes('secret') ||
-            k.toLowerCase().includes('pass') ||
-            k.toLowerCase().includes('token') ||
-            k.toLowerCase().includes('key'),
-        }));
-      setEnvVars(parsed);
-    } else {
-      setEnvVars([]);
+    const all = Object.entries(service.env || {});
+    const userVars: { key: string; value: string; masked: boolean }[] = [];
+    const sysVars: { key: string; value: string; masked: boolean }[] = [];
+    for (const [k, v] of all) {
+      const entry = { key: k, value: v, masked: isMaskedKey(k) };
+      if (isSystemEnvKey(k)) sysVars.push(entry);
+      else userVars.push(entry);
     }
+    setEnvVars(userVars);
+    setSystemEnvVars(sysVars);
     setServiceName(service.name);
     setRuntimeMode(service.runtimeMode || 'web');
     setAppPort(service.port || service.internalPort || (service.env?.PORT ? parseInt(service.env.PORT, 10) : 3000));
@@ -216,6 +367,8 @@ export function ServiceDetailDrawer({
     setStartCommand(service.startCommand || service.env?.START_COMMAND || '');
     setStaticOutput(service.env?.STATIC_OUTPUT || '');
     setSubfolderPath(service.subfolder || service.env?.GIT_SUBFOLDER || '');
+    setSystemPackages(service.systemPackages || service.env?.SYSTEM_PACKAGES || '');
+    setNodeVersion(service.nodeVersion || service.env?.NODE_VERSION || '');
   }, [service]);
 
   // Log streaming via EventSource (Live Build Logs or Live Container Logs)
@@ -335,39 +488,76 @@ export function ServiceDetailDrawer({
     await persistEnvVars(updated);
   }
 
+  /** Parse a `.env`-style text block into env var entries. */
+  function parseEnvText(text: string) {
+    const out: { key: string; value: string; masked: boolean }[] = [];
+    const seen = new Set<string>();
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const eq = t.indexOf('=');
+      if (eq === -1) continue;
+      const key = t.slice(0, eq).trim();
+      let value = t.slice(eq + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push({ key, value, masked: isMaskedKey(key) });
+    }
+    return out;
+  }
+
+  function openRawEditor() {
+    setRawEnvText(envVars.map((v) => `${v.key}=${v.value}`).join('\n'));
+    setEnvViewMode('raw');
+  }
+
+  async function saveRawEnv() {
+    const parsed = parseEnvText(rawEnvText);
+    setIsSavingRaw(true);
+    setEnvVars(parsed);
+    await persistEnvVars(parsed);
+    setIsSavingRaw(false);
+    setEnvViewMode('table');
+  }
+
+  function startEditVariable(idx: number, v: { key: string; value: string }) {
+    setEditingIndex(idx);
+    setEditKey(v.key);
+    setEditValue(v.value);
+  }
+
+  async function saveEditVariable(idx: number) {
+    const k = editKey.trim();
+    if (!k) return;
+    const updated = envVars.map((x, i) =>
+      i === idx ? { ...x, key: k, value: editValue, masked: isMaskedKey(k) } : x
+    );
+    setEnvVars(updated);
+    setEditingIndex(null);
+    await persistEnvVars(updated);
+  }
+
   async function persistEnvVars(varsList: typeof envVars) {
     setIsSavingEnv(true);
     setSaveEnvNotice(null);
 
     const envMap: Record<string, string> = {};
-    // Preserve existing system keys in container
-    if (service.env) {
-      const SYSTEM_KEYS = new Set([
-        'GIT_REPO',
-        'GIT_BRANCH',
-        'PORT',
-        'PATH',
-        'NODE_VERSION',
-        'YARN_VERSION',
-        'HOME',
-        'PWD',
-        'SHLVL',
-      ]);
-      for (const [k, v] of Object.entries(service.env)) {
-        if (SYSTEM_KEYS.has(k)) {
-          envMap[k] = v;
-        }
-      }
-    }
-    // Add user environment variables
+    // Send only the user's variables; the server preserves platform-managed keys.
     for (const item of varsList) {
-      envMap[item.key] = item.value;
+      if (item.key) envMap[item.key] = item.value;
     }
 
     try {
       await updateServiceEnv(service.id, envMap);
       setSaveEnvNotice('Variables updated & committed');
       setTimeout(() => setSaveEnvNotice(null), 3000);
+      setShowRedeployToast(true);
       onServiceUpdated?.({ ...service, env: envMap });
     } catch (err: any) {
       setSaveEnvNotice(`Error: ${err.message}`);
@@ -379,6 +569,9 @@ export function ServiceDetailDrawer({
   async function handleRedeployService() {
     setIsRedeploying(true);
     setSaveEnvNotice(null);
+    // Optimistically reflect the building state immediately on the canvas node
+    // (the background poll confirms within a few seconds).
+    onServiceUpdated?.({ ...service, status: 'building', phase: 'queued' });
     // Jump straight to the live Build Logs view so compilation streams in real time
     // while the (long-running) rebuild request is still in flight on the server.
     setActiveTab('logs');
@@ -405,6 +598,8 @@ export function ServiceDetailDrawer({
           installCommand,
           buildCommand,
           startCommand,
+          systemPackages,
+          nodeVersion,
         });
         setSaveEnvNotice('Redeployment complete! Container is live.');
         onServiceUpdated?.(result.service);
@@ -453,6 +648,7 @@ export function ServiceDetailDrawer({
   if (!isOpen) return null;
 
   return (
+    <>
     <div className="fixed inset-y-3 right-3 w-[720px] max-w-[95vw] z-50 shadow-2xl rounded-2xl overflow-hidden border border-zinc-800 bg-zinc-950 flex flex-col font-sans text-zinc-100 animate-in slide-in-from-right duration-250 select-text">
       {/* Top Header */}
       <div className="h-14 border-b border-zinc-800 bg-zinc-900/70 px-5 flex items-center justify-between backdrop-blur-md">
@@ -576,7 +772,7 @@ export function ServiceDetailDrawer({
                       {isFailed
                         ? 'FAILED'
                         : isBuilding
-                        ? (service.status?.toUpperCase() ?? 'BUILDING')
+                        ? phaseLabel
                         : (service.status === 'running' ? 'ACTIVE & ROUTED' : service.status?.toUpperCase() ?? 'ACTIVE')}
                     </span>
                     {(service.startedAt || service.createdAt) && (
@@ -750,14 +946,72 @@ export function ServiceDetailDrawer({
                 </p>
               </div>
 
-              {saveEnvNotice && (
-                <div className="px-2.5 py-1 rounded bg-indigo-950/60 border border-indigo-500/40 text-[11px] font-mono text-indigo-300 flex items-center gap-1.5 animate-in fade-in">
-                  <Check className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>{saveEnvNotice}</span>
+              <div className="flex items-center gap-2">
+                <div className="inline-flex rounded-lg bg-zinc-950 p-0.5 border border-zinc-800 text-[11px] font-mono">
+                  <button
+                    type="button"
+                    onClick={() => setEnvViewMode('table')}
+                    className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                      envViewMode === 'table' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
+                    }`}
+                  >
+                    Editor
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openRawEditor}
+                    className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                      envViewMode === 'raw' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
+                    }`}
+                  >
+                    .env
+                  </button>
                 </div>
-              )}
+                {saveEnvNotice && (
+                  <div className="px-2.5 py-1 rounded bg-indigo-950/60 border border-indigo-500/40 text-[11px] font-mono text-indigo-300 flex items-center gap-1.5 animate-in fade-in">
+                    <Check className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>{saveEnvNotice}</span>
+                  </div>
+                )}
+              </div>
             </div>
 
+            {envViewMode === 'raw' ? (
+              <div className="space-y-3">
+                <textarea
+                  value={rawEnvText}
+                  onChange={(e) => setRawEnvText(e.target.value)}
+                  spellCheck={false}
+                  rows={14}
+                  placeholder={'# One variable per line\nKEY=value'}
+                  className="w-full font-mono text-xs bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500/60 resize-y"
+                />
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-[11px] text-zinc-500 font-mono">
+                    Edit as a .env file — one <span className="text-zinc-300">KEY=value</span> per line. Lines starting with # are ignored.
+                  </p>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setEnvViewMode('table')}
+                      className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 rounded-lg text-xs font-medium cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={saveRawEnv}
+                      disabled={isSavingRaw}
+                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      <span>{isSavingRaw ? 'Saving…' : 'Save variables'}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
             {/* Variables List */}
             <div className="border border-zinc-800 rounded-xl overflow-hidden bg-zinc-900/30 divide-y divide-zinc-800">
               {envVars.length === 0 ? (
@@ -765,43 +1019,84 @@ export function ServiceDetailDrawer({
                   No custom environment variables configured. Add your first variable below.
                 </div>
               ) : (
-                envVars.map((v, idx) => (
-                  <div key={v.key || idx} className="p-3 flex items-center justify-between gap-3 text-xs font-mono">
-                    <div className="w-1/3 font-semibold text-indigo-300 truncate">{v.key}</div>
-                    <div className="flex-1 text-zinc-300 truncate bg-zinc-950/80 px-2.5 py-1 rounded border border-zinc-800">
-                      {v.masked ? '••••••••••••••••••••••••' : v.value}
+                envVars.map((v, idx) =>
+                  editingIndex === idx ? (
+                    <div key={idx} className="p-3 flex items-center gap-2 text-xs font-mono bg-zinc-900/40">
+                      <input
+                        value={editKey}
+                        onChange={(e) => setEditKey(e.target.value)}
+                        placeholder="KEY"
+                        className="w-1/3 px-2 py-1 bg-zinc-950 border border-indigo-500/40 rounded-lg text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500"
+                      />
+                      <input
+                        value={editValue}
+                        onChange={(e) => setEditValue(e.target.value)}
+                        placeholder="value"
+                        className="flex-1 px-2 py-1 bg-zinc-950 border border-indigo-500/40 rounded-lg text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500"
+                      />
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          onClick={() => saveEditVariable(idx)}
+                          disabled={!editKey.trim() || isSavingEnv}
+                          className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-40 rounded cursor-pointer"
+                          title="Save changes"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => setEditingIndex(null)}
+                          className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded cursor-pointer"
+                          title="Cancel"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        onClick={() => {
-                          const updated = [...envVars];
-                          updated[idx].masked = !updated[idx].masked;
-                          setEnvVars(updated);
-                        }}
-                        className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded cursor-pointer"
-                        title={v.masked ? 'Reveal value' : 'Hide value'}
-                      >
-                        {v.masked ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-                      </button>
-                      <button
-                        onClick={() => {
-                          navigator.clipboard?.writeText(v.value);
-                        }}
-                        className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded cursor-pointer"
-                        title="Copy variable"
-                      >
-                        <Copy className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteVariable(idx)}
-                        className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-950/40 rounded cursor-pointer"
-                        title="Delete variable"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                  ) : (
+                    <div key={v.key || idx} className="p-3 flex items-center justify-between gap-3 text-xs font-mono">
+                      <div className="w-1/3 font-semibold text-indigo-300 truncate">{v.key}</div>
+                      <div className="flex-1 text-zinc-300 truncate bg-zinc-950/80 px-2.5 py-1 rounded border border-zinc-800">
+                        {v.masked ? '••••••••••••••••••••••••' : v.value}
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          onClick={() => startEditVariable(idx, v)}
+                          className="p-1.5 text-zinc-400 hover:text-indigo-300 hover:bg-indigo-950/40 rounded cursor-pointer"
+                          title="Edit variable"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            const updated = [...envVars];
+                            updated[idx].masked = !updated[idx].masked;
+                            setEnvVars(updated);
+                          }}
+                          className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded cursor-pointer"
+                          title={v.masked ? 'Reveal value' : 'Hide value'}
+                        >
+                          {v.masked ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                        </button>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard?.writeText(v.value);
+                          }}
+                          className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded cursor-pointer"
+                          title="Copy variable"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteVariable(idx)}
+                          className="p-1.5 text-red-400 hover:text-red-300 hover:bg-red-950/40 rounded cursor-pointer"
+                          title="Delete variable"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  )
+                )
               )}
 
               {/* Add New Variable Input Row */}
@@ -827,6 +1122,36 @@ export function ServiceDetailDrawer({
                   <span>Add</span>
                 </button>
               </form>
+
+              {/* System / container variables — hidden by default */}
+              {systemEnvVars.length > 0 && (
+                <div className="p-3 bg-zinc-950/40">
+                  <button
+                    type="button"
+                    onClick={() => setShowSystemVars((s) => !s)}
+                    className="text-[11px] font-mono text-zinc-500 hover:text-zinc-300 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showSystemVars ? 'rotate-180' : ''}`} />
+                    {showSystemVars ? 'Hide' : 'Show'} {systemEnvVars.length} container system variable
+                    {systemEnvVars.length === 1 ? '' : 's'}
+                  </button>
+                  {showSystemVars && (
+                    <div className="mt-2 space-y-1">
+                      {systemEnvVars.map((v, idx) => (
+                        <div
+                          key={v.key || idx}
+                          className="flex items-center justify-between gap-3 text-[11px] font-mono text-zinc-500"
+                        >
+                          <span className="w-1/3 truncate">{v.key}</span>
+                          <span className="flex-1 truncate text-zinc-600 bg-zinc-950/60 px-2 py-0.5 rounded border border-zinc-900">
+                            {v.value}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Variable Referencing Tip */}
@@ -834,6 +1159,8 @@ export function ServiceDetailDrawer({
               <span>Reference in other services via: <code className="text-indigo-400">${`{`}{`{`} {serviceName}.PORT {`}`}{`}`}</code></span>
               <span className="text-zinc-500">Auto-linking enabled</span>
             </div>
+              </>
+            )}
           </div>
         )}
 
@@ -847,15 +1174,15 @@ export function ServiceDetailDrawer({
                 Public Endpoints & Routing
               </h4>
               <p className="text-[11px] text-zinc-400 mb-4">
-                Edge routing via Caddy with automatic Let&apos;s Encrypt TLS certificates.
+                Edge routing via Caddy with automatic Let&apos;s Encrypt TLS certificates. Point a DNS record at this server and Caddy issues the certificate automatically.
               </p>
 
-              {/* Default Railway Domain */}
-              <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-900/30 flex items-center justify-between">
+              {/* Internal Bridge Host */}
+              <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-900/30 flex items-center justify-between mb-4">
                 <div>
                   <div className="text-[10px] text-zinc-500 font-mono uppercase">Internal Bridge Host</div>
                   <div className="font-mono text-xs font-semibold text-zinc-200 mt-0.5">
-                    http://{service.name}.paas-internal-network:{service.port || 3000}
+                    {service.name}.paas-internal-network:{service.internalPort || service.port || 3000}
                   </div>
                   <div className="text-[11px] text-emerald-400 font-mono mt-1 flex items-center gap-1">
                     <ShieldCheck className="w-3.5 h-3.5" />
@@ -873,37 +1200,140 @@ export function ServiceDetailDrawer({
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               </div>
+
+              {/* DNS target (server IP) */}
+              {serverIp && (
+                <div className="p-4 rounded-xl border border-indigo-500/20 bg-indigo-500/5 flex items-center justify-between mb-4">
+                  <div>
+                    <div className="text-[10px] text-indigo-300 font-mono uppercase">DNS Target · point your domain here</div>
+                    <div className="font-mono text-sm font-semibold text-zinc-100 mt-0.5">{serverIp}</div>
+                    <div className="text-[11px] text-zinc-400 font-mono mt-1">
+                      Create an <span className="text-zinc-200">A</span> record → {serverIp} (or a CNAME for subdomains).
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => { try { navigator.clipboard.writeText(serverIp); } catch {} }}
+                    className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-700 rounded-lg text-xs font-mono flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy IP</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Public Domains List */}
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-xs font-semibold text-zinc-300">Public Domains ({domains.length})</h4>
+                {domains.length > 0 && (
+                  <button
+                    onClick={handleVerifyDomains}
+                    disabled={isVerifying}
+                    className="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-200 border border-zinc-700 rounded-lg text-[11px] font-mono flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isVerifying ? 'animate-spin' : ''}`} />
+                    <span>Verify DNS</span>
+                  </button>
+                )}
+              </div>
+              {domains.length === 0 ? (
+                <div className="p-3 rounded-lg border border-dashed border-zinc-800 text-[11px] text-zinc-500 font-mono">
+                  No domains assigned yet. Set a base server domain in Settings → Domains to auto-assign{' '}
+                  <code className="text-indigo-400">{'<service>.yourdomain.com'}</code>, or add a custom domain below.
+                </div>
+              ) : (
+                <div className="border border-zinc-800 rounded-xl overflow-hidden divide-y divide-zinc-800 bg-zinc-950/60">
+                  {domains.map((d) => {
+                    const st = domainStatusMap[d];
+                    const verified = st?.status === 'verified';
+                    return (
+                      <div key={d} className="p-3 flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Globe className={`w-3.5 h-3.5 shrink-0 ${verified ? 'text-emerald-400' : 'text-amber-400'}`} />
+                          <div className="min-w-0">
+                            <a
+                              href={`https://${d}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-mono text-xs text-zinc-200 hover:text-indigo-300 truncate block"
+                            >
+                              {d}
+                            </a>
+                            <div className="text-[10px] font-mono mt-0.5">
+                              {verified ? (
+                                <span className="text-emerald-400">Verified</span>
+                              ) : (
+                                <span className="text-amber-400">
+                                  Pending{st?.lastError ? ` · ${st.lastError}` : ''}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-mono border ${
+                              verified
+                                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                                : 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                            }`}
+                          >
+                            {verified ? 'verified' : 'pending'}
+                          </span>
+                          <a
+                            href={`https://${d}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="p-1.5 text-zinc-400 hover:text-zinc-200 rounded-md hover:bg-zinc-800"
+                            title="Open"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </a>
+                          <button
+                            onClick={() => handleRemoveDomain(d)}
+                            className="p-1.5 text-zinc-400 hover:text-red-400 rounded-md hover:bg-zinc-800 cursor-pointer"
+                            title="Remove domain"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
-            {/* Custom Domain Input */}
+            {/* Add Custom Domain */}
             <div className="space-y-3">
-              <h4 className="text-xs font-semibold text-zinc-300">Custom Domain</h4>
+              <h4 className="text-xs font-semibold text-zinc-300">Add Custom Domain</h4>
               <div className="flex items-center gap-2">
                 <input
-                  value={customDomain}
-                  onChange={(e) => setCustomDomain(e.target.value)}
+                  value={newDomain}
+                  onChange={(e) => setNewDomain(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleAddDomain(); }}
                   placeholder="api.yourdomain.com"
                   className="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
                 />
                 <button
-                  onClick={() => {
-                    if (customDomain) {
-                      setDomainSaved(true);
-                      setTimeout(() => setDomainSaved(false), 3000);
-                    }
-                  }}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition-colors cursor-pointer"
+                  onClick={handleAddDomain}
+                  disabled={isSavingDomain || !newDomain.trim()}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
                 >
-                  Add Domain
+                  {isSavingDomain ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                  <span>Add Domain</span>
                 </button>
               </div>
 
-              {domainSaved && (
-                <div className="p-3 rounded-lg bg-emerald-950/40 border border-emerald-500/30 text-xs font-mono text-emerald-300 flex items-center gap-2">
-                  <Check className="w-4 h-4 text-emerald-400" />
-                  <span>Configured CNAME DNS record. Caddy will auto-issue Let&apos;s Encrypt certificate.</span>
+              {domainError && (
+                <div className="p-3 rounded-lg bg-red-950/40 border border-red-500/30 text-xs font-mono text-red-300 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400" />
+                  <span>{domainError}</span>
                 </div>
               )}
+
+              <div className="p-3 rounded-lg bg-zinc-900/40 border border-zinc-800 text-[11px] text-zinc-400 font-mono">
+                Add a <span className="text-zinc-200">CNAME</span> (or <span className="text-zinc-200">A</span> for apex) record pointing this host at the server, then Caddy auto-issues the TLS certificate on first request.
+              </div>
             </div>
           </div>
         )}
@@ -1177,9 +1607,21 @@ export function ServiceDetailDrawer({
                     <Terminal className="w-3.5 h-3.5" />
                     <span>Dockerfile...</span>
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setBuildMethod('slim')}
+                    className={`px-4 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer ${
+                      buildMethod === 'slim'
+                        ? 'bg-amber-400 text-zinc-950 shadow-sm font-semibold'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    <span>Fast ⚡</span>
+                  </button>
                 </div>
                 <p className="text-[11px] text-zinc-500">
-                  Auto uses your repository's Dockerfile when one exists, otherwise Railpack builds the project.
+                  Auto uses your repo's Dockerfile when present, else Railpack/Nixpacks. <strong className="text-amber-300/90">Fast</strong> generates a slim Node/Python/Go Dockerfile for quick cold builds &amp; smaller images.
                 </p>
               </div>
 
@@ -1262,6 +1704,39 @@ export function ServiceDetailDrawer({
                     className="w-full px-3 py-2 bg-zinc-900/90 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
                   />
                 </div>
+
+                {/* NODE VERSION */}
+                <div>
+                  <label className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider block mb-1.5 font-mono">
+                    Node Version
+                  </label>
+                  <input
+                    value={nodeVersion}
+                    onChange={(e) => setNodeVersion(e.target.value)}
+                    placeholder="auto (defaults to 20)"
+                    className="w-full px-3 py-2 bg-zinc-900/90 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
+                  />
+                  <p className="text-[10px] text-zinc-500 mt-1 font-mono">
+                    e.g. 20, 22. Used for Nixpacks &amp; the Fast preset. Leave blank to auto (repo pin, else 20).
+                  </p>
+                </div>
+
+                {/* SYSTEM PACKAGES */}
+                <div className="col-span-2">
+                  <label className="text-[10px] font-semibold text-amber-300/90 uppercase tracking-wider block mb-1.5 font-mono flex items-center gap-1.5">
+                    <Zap className="w-3 h-3" />
+                    System Packages (Fast ⚡ preset)
+                  </label>
+                  <input
+                    value={systemPackages}
+                    onChange={(e) => setSystemPackages(e.target.value)}
+                    placeholder="e.g. libpq-dev imagemagick git"
+                    className="w-full px-3 py-2 bg-zinc-900/90 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/50"
+                  />
+                  <p className="text-[10px] text-zinc-500 mt-1 font-mono">
+                    OS packages (apt on Debian bases) installed into the slim Fast image — use only with the Fast build method.
+                  </p>
+                </div>
               </div>
 
               {/* Action Buttons */}
@@ -1281,6 +1756,8 @@ export function ServiceDetailDrawer({
                         installCommand: installCommand.trim() || undefined,
                         buildCommand: buildCommand.trim() || undefined,
                         startCommand: startCommand.trim() || undefined,
+                        systemPackages: systemPackages.trim() || undefined,
+                        nodeVersion: nodeVersion.trim() || undefined,
                       });
                       setSettingsSaved(true);
                       setSettingsNotice({ type: 'success', msg: 'Settings saved successfully!' });
@@ -1319,6 +1796,8 @@ export function ServiceDetailDrawer({
                     onClick={async () => {
                       setIsRedeploying(true);
                       setSettingsNotice(null);
+                      // Optimistically mark the canvas node as building right away.
+                      onServiceUpdated?.({ ...service, status: 'building', phase: 'queued' });
                       // Stream live build logs immediately while the rebuild runs.
                       setActiveTab('logs');
                       setLogSubTab('build');
@@ -1332,6 +1811,8 @@ export function ServiceDetailDrawer({
                           installCommand: installCommand.trim() || undefined,
                           buildCommand: buildCommand.trim() || undefined,
                           startCommand: startCommand.trim() || undefined,
+                          systemPackages: systemPackages.trim() || undefined,
+                          nodeVersion: nodeVersion.trim() || undefined,
                         });
                         setSettingsNotice({ type: 'success', msg: 'Service rebuilt & redeployed successfully!' });
                         onServiceUpdated?.(res.service);
@@ -1449,5 +1930,52 @@ export function ServiceDetailDrawer({
         isDeleting={isDeletingService}
       />
     </div>
+
+      {/* Bottom-right toast prompting a redeploy to apply variable changes */}
+      {showRedeployToast && (
+        <div className="fixed bottom-4 right-4 z-[70] w-80 rounded-xl border border-indigo-500/40 bg-zinc-900/95 backdrop-blur-md shadow-2xl p-3.5 animate-in slide-in-from-bottom-2 fade-in">
+          <div className="flex items-start gap-2.5">
+            <div className="w-7 h-7 rounded-lg bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-semibold text-zinc-100">Environment variables updated</div>
+              <div className="text-[11px] text-zinc-400 mt-0.5">
+                Redeploy to apply the changes to the running container.
+              </div>
+              <div className="flex items-center gap-2 mt-2.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRedeployToast(false);
+                    handleRedeployService();
+                  }}
+                  disabled={isRedeploying || isBuilding}
+                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RotateCw className={`w-3.5 h-3.5 ${isRedeploying ? 'animate-spin' : ''}`} />
+                  <span>{isRedeploying ? 'Redeploying…' : 'Redeploy'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowRedeployToast(false)}
+                  className="px-2.5 py-1.5 text-zinc-400 hover:text-zinc-200 text-xs font-medium cursor-pointer"
+                >
+                  Later
+                </button>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowRedeployToast(false)}
+              className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 rounded cursor-pointer shrink-0"
+              title="Dismiss"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

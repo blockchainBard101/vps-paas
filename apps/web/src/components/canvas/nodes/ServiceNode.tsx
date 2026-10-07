@@ -4,10 +4,46 @@ import React from 'react';
 import { Handle, Position } from '@xyflow/react';
 import { Globe, GitBranch, Cpu, MemoryStick, Terminal, Sliders, RefreshCw, AlertCircle, Sparkles } from 'lucide-react';
 
+const PHASES = ['queued', 'importing', 'building', 'deploying'];
+const PHASE_STEPS = [
+  { key: 'queued', label: 'Queued' },
+  { key: 'importing', label: 'Import' },
+  { key: 'building', label: 'Build' },
+  { key: 'deploying', label: 'Deploy' },
+];
+
 export function ServiceNode({ data, selected }: { data: any; selected: boolean }) {
   const isHealthy = data.status === 'running' || data.status === 'active';
   const isBuilding = data.status === 'building' || data.status === 'deploying';
   const isFailed = data.status === 'failed' || data.status === 'error';
+
+  // Granular lifecycle label driven by the server-reported build phase.
+  const phase = String(data.phase || '').toLowerCase();
+  const buildLabel =
+    phase === 'queued'
+      ? 'Queued'
+      : phase === 'importing'
+      ? 'Importing'
+      : phase === 'building'
+      ? 'Building'
+      : phase === 'deploying'
+      ? 'Deploying'
+      : phase === 'running'
+      ? 'Starting'
+      : data.status === 'deploying'
+      ? 'Deploying'
+      : 'Building';
+
+  const buildDetail =
+    phase === 'queued'
+      ? 'Preparing deployment…'
+      : phase === 'importing'
+      ? 'Cloning repository & resolving dependencies'
+      : phase === 'building'
+      ? 'Compiling OCI container image'
+      : phase === 'deploying' || phase === 'running'
+      ? 'Starting container & routing traffic'
+      : 'Compiling & deploying';
 
   return (
     <div
@@ -64,7 +100,7 @@ export function ServiceNode({ data, selected }: { data: any; selected: boolean }
           {isBuilding ? (
             <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-400 text-[10px] font-mono font-medium">
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping mr-0.5" />
-              <span>{data.status === 'deploying' ? 'Deploying' : 'Building'}</span>
+              <span>{buildLabel}</span>
             </span>
           ) : isFailed ? (
             <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-500/15 border border-red-500/30 text-red-400 text-[10px] font-mono font-medium">
@@ -86,18 +122,51 @@ export function ServiceNode({ data, selected }: { data: any; selected: boolean }
 
       {/* Live Resource Gauges or Building Status */}
       {isBuilding ? (
-        <div className="mt-3 p-2.5 bg-zinc-950/70 rounded-lg border border-amber-500/20 text-xs font-mono space-y-1.5">
+        <div className="mt-3 p-2.5 bg-zinc-950/70 rounded-lg border border-amber-500/20 text-xs font-mono space-y-2">
           <div className="flex items-center justify-between text-amber-300">
             <span className="flex items-center gap-1.5 text-[11px] font-semibold">
               <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-              <span>Compiling &amp; Deploying</span>
+              <span>{buildLabel}</span>
             </span>
             <span className="text-[10px] text-zinc-500 font-sans">Port {data.port || 3000}</span>
           </div>
+
+          <div className="text-[10px] text-zinc-400 leading-snug">{buildDetail}</div>
+
+          {/* Lifecycle phase stepper */}
+          <div className="flex items-center gap-1 pt-0.5">
+            {PHASE_STEPS.map((step, i) => {
+              const activeIdx = PHASES.indexOf(phase === 'running' ? 'deploying' : phase);
+              const isDone = activeIdx >= 0 && i < activeIdx;
+              const isActive = i === activeIdx;
+              return (
+                <div key={step.key} className="flex-1 flex items-center gap-1">
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      isDone ? 'bg-emerald-400' : isActive ? 'bg-amber-400 animate-pulse' : 'bg-zinc-700'
+                    }`}
+                  />
+                  <span
+                    className={`text-[9px] ${
+                      isDone ? 'text-emerald-400' : isActive ? 'text-amber-300 font-semibold' : 'text-zinc-600'
+                    }`}
+                  >
+                    {step.label}
+                  </span>
+                  {i < PHASE_STEPS.length - 1 && <span className="flex-1 h-px bg-zinc-800" />}
+                </div>
+              );
+            })}
+          </div>
+
           <div className="text-[10px] text-zinc-400 flex items-center justify-between">
             <span>Strategy:</span>
             <span className="text-zinc-300 truncate max-w-[150px]">
-              {data.buildStrategy === 'dockerfile' ? 'Dockerfile builder' : 'Nixpacks OCI compiler'}
+              {data.buildStrategy === 'dockerfile'
+                ? 'Dockerfile builder'
+                : data.buildStrategy === 'slim'
+                ? 'Fast slim builder ⚡'
+                : 'Nixpacks OCI compiler'}
             </span>
           </div>
         </div>
@@ -142,11 +211,10 @@ export function ServiceNode({ data, selected }: { data: any; selected: boolean }
             e.stopPropagation();
             data.onOpenLogs?.();
           }}
-          disabled={isBuilding}
-          className="py-1.5 px-2 bg-zinc-800/60 hover:bg-zinc-800 disabled:opacity-50 text-zinc-300 border border-zinc-700/50 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+          className="py-1.5 px-2 bg-zinc-800/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/50 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
         >
           <Terminal className="w-3 h-3 text-emerald-400" />
-          <span>Logs</span>
+          <span>{isBuilding ? 'Build Logs' : 'Logs'}</span>
         </button>
       </div>
 

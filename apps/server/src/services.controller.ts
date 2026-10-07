@@ -69,16 +69,33 @@ export class ServicesController {
     @Body()
     body: {
       dockerfilePath?: string;
-      buildMethod?: 'auto' | 'railpack' | 'dockerfile';
+      buildMethod?: 'auto' | 'railpack' | 'dockerfile' | 'slim';
       runtimeMode?: 'web' | 'worker';
       subfolder?: string;
       port?: number;
       installCommand?: string;
       buildCommand?: string;
       startCommand?: string;
+      systemPackages?: string;
+      nodeVersion?: string;
     },
   ) {
     return this.servicesService.updateSettings(id, body);
+  }
+
+  @Post(':id/domains')
+  addDomain(@Param('id') id: string, @Body() body: { domain: string }) {
+    return this.servicesService.addDomain(id, body.domain);
+  }
+
+  @Delete(':id/domains')
+  removeDomain(@Param('id') id: string, @Body() body: { domain: string }) {
+    return this.servicesService.removeDomain(id, body.domain);
+  }
+
+  @Post(':id/domains/verify')
+  verifyDomains(@Param('id') id: string) {
+    return this.servicesService.verifyServiceDomains(id);
   }
 
   @Get(':id/logs')

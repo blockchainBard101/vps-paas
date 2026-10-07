@@ -306,6 +306,16 @@ export class GitHubController {
     return this.githubService.detectRepoBuild(owner, repo, branch, subfolder, dockerfilePath);
   }
 
+  @Get('repos/:owner/:repo/env-suggestions')
+  envSuggestions(
+    @Param('owner') owner: string,
+    @Param('repo') repo: string,
+    @Query('branch') branch?: string,
+    @Query('subfolder') subfolder?: string,
+  ) {
+    return this.githubService.suggestEnvVars(owner, repo, branch, subfolder);
+  }
+
   @Post('deploy')
   deployFromGitHub(
     @Body()
@@ -316,11 +326,13 @@ export class GitHubController {
       cloneUrl: string;
       subfolder?: string;
       dockerfilePath?: string;
-      buildMethod?: 'auto' | 'railpack' | 'dockerfile';
+      buildMethod?: 'auto' | 'railpack' | 'dockerfile' | 'slim';
       runtimeMode?: 'web' | 'worker';
       installCommand?: string;
       buildCommand?: string;
       startCommand?: string;
+      systemPackages?: string;
+      nodeVersion?: string;
       port?: number;
       env?: Record<string, string>;
     },
@@ -373,6 +385,11 @@ export class GitHubController {
     return this.githubService.getBuildLogs(id);
   }
 
+  @Get('build-status/:id')
+  getBuildStatus(@Param('id') id: string) {
+    return this.githubService.getBuildStatus(id);
+  }
+
   @Get('deployments/history/:serviceId')
   getDeployHistory(@Param('serviceId') serviceId: string) {
     return this.githubService.getDeployHistory(serviceId);
@@ -387,13 +404,15 @@ export class GitHubController {
       branch?: string;
       cloneUrl?: string;
       dockerfilePath?: string;
-      buildMethod?: 'auto' | 'railpack' | 'dockerfile';
+      buildMethod?: 'auto' | 'railpack' | 'dockerfile' | 'slim';
       runtimeMode?: 'web' | 'worker';
       subfolder?: string;
       port?: number;
       installCommand?: string;
       buildCommand?: string;
       startCommand?: string;
+      systemPackages?: string;
+      nodeVersion?: string;
     },
   ) {
     return this.githubService.redeployService(serviceId, body);

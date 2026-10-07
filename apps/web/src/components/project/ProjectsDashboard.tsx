@@ -59,17 +59,21 @@ export function ProjectsDashboard({
 
   useEffect(() => {
     loadProjects();
+    // Poll periodically so service/database counts and status badges stay fresh
+    // after deploys without requiring a manual reload.
+    const interval = setInterval(() => loadProjects(true), 5000);
+    return () => clearInterval(interval);
   }, []);
 
-  async function loadProjects() {
-    setLoading(true);
+  async function loadProjects(silent = false) {
+    if (!silent) setLoading(true);
     try {
       const data = await fetchProjects();
       setProjects(data);
     } catch {
-      setProjects([]);
+      if (!silent) setProjects([]);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   ReactFlow,
   MiniMap,
@@ -33,6 +33,7 @@ import {
   fetchDatabases,
   deployService,
   fetchServices,
+  fetchBuildStatus,
   updateServiceEnv,
   fetchProject,
   saveProjectCanvas,
@@ -80,6 +81,12 @@ export function RailwayCanvas({
   const [currentProject, setCurrentProject] = useState(activeProject);
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  // Always-current snapshot of nodes for use inside the polling loop (the loop
+  // closure would otherwise hold stale node state).
+  const nodesRef = useRef<Node[]>([]);
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
 
   // Studio and Terminal state
   const [activeStudioDb, setActiveStudioDb] = useState<{ id: string; name: string } | null>(null);
@@ -87,7 +94,7 @@ export function RailwayCanvas({
   const [pendingDeleteDb, setPendingDeleteDb] = useState<{ id: string; name: string; engine?: string } | null>(null);
   const [isDeletingDb, setIsDeletingDb] = useState(false);
   const [isCreateServiceModalOpen, setIsCreateServiceModalOpen] = useState(false);
-  const [activeTerminalService, setActiveTerminalService] = useState<{ id?: string; name: string } | null>(null);
+  const [activeTerminalService, setActiveTerminalService] = useState<{ id?: string; name: string; tab?: 'build' | 'runtime' } | null>(null);
   const [linkNotification, setLinkNotification] = useState<string | null>(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isGitHubModalOpen, setIsGitHubModalOpen] = useState(false);
@@ -140,6 +147,22 @@ export function RailwayCanvas({
 
         if (!isSubscribed) return;
 
+        // Resolve the authoritative build-session status for EVERY service node —
+        // both temporary `deploying-*` placeholders AND real services currently
+        // being redeployed — so the node's colour/state is accurate in real time.
+        const serviceNodes = nodesRef.current.filter((n) => n.type === 'serviceNode');
+        const buildInfo = new Map<string, { status: string; phase?: string }>();
+        await Promise.all(
+          serviceNodes.map(async (n) => {
+            try {
+              const res = await fetchBuildStatus(n.id);
+              if (res && res.status && res.status !== 'not_found') {
+                buildInfo.set(n.id, { status: res.status, phase: res.phase });
+              }
+            } catch {}
+          })
+        );
+
         setNodes((prevNodes: Node[]) => {
           let hasChanges = false;
           const nextNodes = prevNodes.map((n: Node) => {
@@ -178,16 +201,47 @@ export function RailwayCanvas({
                   };
                 }
 
-                // If no service found and timestamp > 3 mins old, mark as failed instead of stuck in building
-                const createdMs = parseInt(n.id.replace('deploying-', ''), 10);
-                if (!isNaN(createdMs) && Date.now() - createdMs > 180000 && nodeData.status === 'building') {
+                // The server tracks the real build status and phase. If it reports
+                // failure, reflect that immediately; otherwise keep the node building
+                // and advance its phase label (importing → building → deploying).
+                const info = buildInfo.get(n.id);
+                const sessionStatus = info?.status;
+                if (sessionStatus === 'failed') {
                   hasChanges = true;
                   return {
                     ...n,
                     data: {
                       ...nodeData,
                       status: 'failed',
-                      errorMessage: 'Build process timed out or was interrupted. Check deployment logs or redeploy.',
+                      errorMessage:
+                        nodeData.errorMessage ||
+                        'Build or deployment failed. Open the logs for details.',
+                    },
+                  };
+                }
+
+                const livePhase = info?.phase;
+                if (livePhase && nodeData.phase !== livePhase) {
+                  hasChanges = true;
+                  return { ...n, data: { ...nodeData, phase: livePhase } };
+                }
+
+                // Fallback for orphaned placeholders (e.g. the request was lost and
+                // no build session exists). Only fail after a generous grace period.
+                const createdMs = parseInt(n.id.replace('deploying-', ''), 10);
+                if (
+                  !sessionStatus &&
+                  !isNaN(createdMs) &&
+                  Date.now() - createdMs > 1800000 &&
+                  nodeData.status === 'building'
+                ) {
+                  hasChanges = true;
+                  return {
+                    ...n,
+                    data: {
+                      ...nodeData,
+                      status: 'failed',
+                      errorMessage: 'Build did not start or was interrupted. Retry the deployment.',
                     },
                   };
                 }
@@ -202,11 +256,21 @@ export function RailwayCanvas({
 
               if (realService) {
                 const currentStatus = realService.status || 'running';
+                // If a build session is active for this service, reflect the live
+                // building/deploying state (yellow) on the node as well.
+                const info = buildInfo.get(realService.id) || buildInfo.get(n.id);
+                const isBuilding = info?.status === 'building';
+                const desiredStatus = isBuilding ? 'building' : currentStatus;
+                const desiredPhase = isBuilding ? info?.phase : undefined;
+
                 if (
-                  nodeData.status !== currentStatus ||
+                  nodeData.status !== desiredStatus ||
+                  nodeData.phase !== desiredPhase ||
                   nodeData.port !== realService.port ||
                   nodeData.createdAt !== realService.createdAt ||
-                  nodeData.startedAt !== realService.startedAt
+                  nodeData.startedAt !== realService.startedAt ||
+                  (nodeData.domains || []).join(',') !== (realService.domains || []).join(',') ||
+                  JSON.stringify(nodeData.domainStatus || {}) !== JSON.stringify(realService.domainStatus || {})
                 ) {
                   hasChanges = true;
                   return {
@@ -215,7 +279,8 @@ export function RailwayCanvas({
                     data: {
                       ...nodeData,
                       name: realService.name,
-                      status: currentStatus,
+                      status: desiredStatus,
+                      phase: desiredPhase,
                       port: realService.port || nodeData.port || 3000,
                       gitRepo: realService.gitRepo || nodeData.gitRepo,
                       gitBranch: realService.gitBranch || nodeData.gitBranch,
@@ -223,6 +288,8 @@ export function RailwayCanvas({
                       createdAt: realService.createdAt,
                       startedAt: realService.startedAt,
                       env: realService.env || nodeData.env || {},
+                      domains: realService.domains || nodeData.domains || [],
+                      domainStatus: realService.domainStatus || nodeData.domainStatus || {},
                     },
                   };
                 }
@@ -282,15 +349,19 @@ export function RailwayCanvas({
         const d = activeNode.data as any;
         if (
           d.status !== selectedServiceForDrawer.status ||
+          d.phase !== selectedServiceForDrawer.phase ||
           d.errorMessage !== selectedServiceForDrawer.errorMessage ||
           d.startedAt !== selectedServiceForDrawer.startedAt ||
-          d.gitRepo !== selectedServiceForDrawer.gitRepo
+          d.gitRepo !== selectedServiceForDrawer.gitRepo ||
+          (d.domains || []).join(',') !== ((selectedServiceForDrawer as any).domains || []).join(',') ||
+          JSON.stringify(d.domainStatus || {}) !== JSON.stringify((selectedServiceForDrawer as any).domainStatus || {})
         ) {
           setSelectedServiceForDrawer((prev: any) => ({
             ...prev,
             id: activeNode.id,
             name: d.name || prev.name,
             status: d.status,
+            phase: d.phase,
             errorMessage: d.errorMessage,
             gitRepo: d.gitRepo,
             gitBranch: d.gitBranch || d.branch,
@@ -300,6 +371,8 @@ export function RailwayCanvas({
             startedAt: d.startedAt,
             port: d.port,
             env: d.env,
+            domains: d.domains || [],
+            domainStatus: d.domainStatus || {},
           }));
         }
       }
@@ -566,7 +639,15 @@ export function RailwayCanvas({
                     engine: nodeData.engine || (n.id.includes('redis') ? 'redis' : 'postgres'),
                     connectionUrl: String(nodeData.connectionUrl || ''),
                   }),
-                onOpenLogs: () => setActiveTerminalService({ id: n.id, name: String(nodeData.name || n.id) }),
+                onOpenLogs: () =>
+                  setActiveTerminalService({
+                    id: n.id,
+                    name: String(nodeData.name || n.id),
+                    tab:
+                      nodeData.status === 'building' || nodeData.status === 'deploying' || n.id.startsWith('deploying-')
+                        ? 'build'
+                        : 'runtime',
+                  }),
                 onOpenDetails: () =>
                   setSelectedServiceForDrawer({
                     id: n.id,
@@ -581,6 +662,7 @@ export function RailwayCanvas({
                     port: nodeData.port || 3000,
                     env: nodeData.env || {},
                     status: String(nodeData.status || 'running'),
+                    phase: nodeData.phase,
                     errorMessage: nodeData.errorMessage,
                     createdAt: nodeData.createdAt,
                     startedAt: nodeData.startedAt,
@@ -608,6 +690,7 @@ export function RailwayCanvas({
                 port: nodeData.port || 3000,
                 env: nodeData.env || {},
                 status: String(nodeData.status || 'running'),
+                phase: nodeData.phase,
                 errorMessage: nodeData.errorMessage,
                 createdAt: nodeData.createdAt,
                 startedAt: nodeData.startedAt,
@@ -798,6 +881,7 @@ export function RailwayCanvas({
         <TerminalDrawer
           serviceId={activeTerminalService.id}
           serviceName={activeTerminalService.name}
+          initialTab={activeTerminalService.tab}
           isOpen={true}
           onClose={() => setActiveTerminalService(null)}
         />
@@ -827,6 +911,7 @@ export function RailwayCanvas({
             data: {
               name: info.name,
               status: 'building',
+              phase: 'queued',
               gitRepo: info.cloneUrl || info.repoName,
               gitBranch: info.branch,
               branch: info.branch,

@@ -1,14 +1,16 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { DockerService } from './docker.service.js';
+import { ensureDataDir } from './config/paths.js';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
 
 export interface SystemSettingsData {
   domains: {
     serverDomain: string;
     wildcardDomain: string;
-    sslProvider: 'letsencrypt' | 'zerossl' | 'selfsigned';
-    acmeEmail: string;
+    serverIp: string;
     proxyType: 'caddy' | 'traefik' | 'nginx';
     customDomains: Array<{
       domain: string;
@@ -16,6 +18,11 @@ export interface SystemSettingsData {
       status: 'active' | 'pending' | 'error';
       sslValidUntil: string;
     }>;
+    /** Verification status of the dashboard (server) domain. */
+    domainStatus?: 'pending' | 'verified';
+    domainStatusCheckedAt?: string;
+    domainStatusVerifiedAt?: string;
+    domainStatusError?: string;
   };
   dns: {
     provider: 'cloudflare' | 'route53' | 'digitalocean' | 'manual';
@@ -92,19 +99,30 @@ export interface SystemSettingsData {
   };
 }
 
+/** A deep-partial used for updates (nested blocks like `domains` accept partials). */
+export type SystemSettingsUpdate = Partial<Omit<SystemSettingsData, 'domains'>> & {
+  domains?: Partial<SystemSettingsData['domains']>;
+};
+
 @Injectable()
 export class SystemSettingsService implements OnModuleInit {
   private settings: SystemSettingsData;
+  private storagePath: string;
 
   constructor(private readonly dockerService: DockerService) {
-    this.settings = {
+    this.storagePath = path.join(ensureDataDir(), 'system-settings.json');
+    this.settings = this.defaultSettings();
+  }
+
+  private defaultSettings(): SystemSettingsData {
+    return {
       domains: {
         serverDomain: '',
         wildcardDomain: '',
-        sslProvider: 'letsencrypt',
-        acmeEmail: '',
+        serverIp: '',
         proxyType: 'caddy',
         customDomains: [],
+        domainStatus: undefined,
       },
       dns: {
         provider: 'manual',
@@ -154,7 +172,7 @@ export class SystemSettingsService implements OnModuleInit {
       },
       deployments: {
         maxConcurrency: 4,
-        buildTimeoutMinutes: 15,
+        buildTimeoutMinutes: 30,
         autoCancelOutdatedBuilds: true,
         retentionDays: 30,
       },
@@ -169,7 +187,48 @@ export class SystemSettingsService implements OnModuleInit {
   }
 
   async onModuleInit() {
+    this.loadFromDisk();
     await this.refreshDockerMetrics();
+  }
+
+  /**
+   * Load persisted settings from disk and deep-merge them over the defaults so
+   * that newly-added fields are always present. Docker metrics are recomputed at
+   * runtime and are intentionally NOT restored from disk.
+   */
+  private loadFromDisk(): void {
+    try {
+      if (!fs.existsSync(this.storagePath)) return;
+      const raw = JSON.parse(fs.readFileSync(this.storagePath, 'utf8'));
+      const d = this.defaultSettings();
+      this.settings = {
+        ...d,
+        ...raw,
+        domains: { ...d.domains, ...(raw.domains || {}) },
+        dns: { ...d.dns, ...(raw.dns || {}) },
+        github: { ...d.github, ...(raw.github || {}) },
+        ai: { ...d.ai, ...(raw.ai || {}) },
+        apiAccess: { tokens: Array.isArray(raw?.apiAccess?.tokens) ? raw.apiAccess.tokens : [] },
+        users: Array.isArray(raw?.users) ? raw.users : [],
+        storage: { ...d.storage, ...(raw.storage || {}) },
+        maintenance: d.maintenance,
+        deployments: { ...d.deployments, ...(raw.deployments || {}) },
+        updates: { ...d.updates, ...(raw.updates || {}) },
+      };
+      // Drop legacy keys that are no longer part of the settings model.
+      delete (this.settings.domains as any).sslProvider;
+      delete (this.settings.domains as any).acmeEmail;
+    } catch (err: any) {
+      console.warn(`[SystemSettings] Could not read ${this.storagePath}: ${err?.message}`);
+    }
+  }
+
+  private saveToDisk(): void {
+    try {
+      fs.writeFileSync(this.storagePath, JSON.stringify(this.settings, null, 2), 'utf8');
+    } catch (err: any) {
+      console.warn(`[SystemSettings] Could not write ${this.storagePath}: ${err?.message}`);
+    }
   }
 
   async refreshDockerMetrics() {
@@ -192,7 +251,64 @@ export class SystemSettingsService implements OnModuleInit {
     return this.settings;
   }
 
-  async updateSettings(partial: Partial<SystemSettingsData>): Promise<SystemSettingsData> {
+  /** Synchronous access to the domains block (no Docker metrics refresh). */
+  getDomains(): SystemSettingsData['domains'] {
+    return this.settings.domains;
+  }
+
+  /**
+   * Synchronous build timeout (ms) derived from the "Build Timeout (Minutes)"
+   * setting. Used by the GitHub build engine so cold Nixpacks builds (which may
+   * download hundreds of MB of the Nix store on first run) aren't killed early.
+   */
+  getBuildTimeoutMs(): number {
+    const mins = this.settings?.deployments?.buildTimeoutMinutes;
+    const safe = typeof mins === 'number' && mins > 0 ? mins : 30;
+    return safe * 60 * 1000;
+  }
+
+  /** How many days deployment history/logs are kept before automatic cleanup. */
+  getRetentionDays(): number {
+    const days = this.settings?.deployments?.retentionDays;
+    return typeof days === 'number' && days > 0 ? days : 30;
+  }
+
+  /** Base server domain used to auto-assign service subdomains (e.g. "example.com"). */
+  getServerDomain(): string {
+    return (this.settings?.domains?.serverDomain || '').trim();
+  }
+
+  /** Optional wildcard template, e.g. "*.example.com". */
+  getWildcardDomain(): string {
+    return (this.settings?.domains?.wildcardDomain || '').trim();
+  }
+
+  /**
+   * Public IP that custom domains should point at. Uses the configured override
+   * when set, otherwise auto-detects the host's primary non-loopback IPv4.
+   */
+  getServerIp(): string {
+    const configured = (this.settings?.domains?.serverIp || '').trim();
+    if (configured) return configured;
+    try {
+      const ifaces = os.networkInterfaces();
+      for (const name of Object.keys(ifaces)) {
+        for (const addr of ifaces[name] || []) {
+          if (addr.family === 'IPv4' && !addr.internal) {
+            return addr.address;
+          }
+        }
+      }
+    } catch {}
+    return '';
+  }
+
+  async updateSettings(partial: SystemSettingsUpdate): Promise<SystemSettingsData> {
+    const nextServerDomain = partial.domains?.serverDomain;
+    const serverDomainChanged =
+      nextServerDomain !== undefined &&
+      nextServerDomain.trim().toLowerCase() !== (this.settings.domains.serverDomain || '').trim().toLowerCase();
+
     this.settings = {
       ...this.settings,
       ...partial,
@@ -205,6 +321,24 @@ export class SystemSettingsService implements OnModuleInit {
       deployments: { ...this.settings.deployments, ...(partial.deployments || {}) },
       updates: { ...this.settings.updates, ...(partial.updates || {}) },
     };
+
+    // A freshly-set dashboard domain starts as 'pending' until DNS is verified.
+    if (serverDomainChanged) {
+      const host = (this.settings.domains.serverDomain || '').trim();
+      if (host) {
+        this.settings.domains.domainStatus = 'pending';
+        this.settings.domains.domainStatusError = undefined;
+        this.settings.domains.domainStatusVerifiedAt = undefined;
+        this.settings.domains.domainStatusCheckedAt = undefined;
+      } else {
+        this.settings.domains.domainStatus = undefined;
+        this.settings.domains.domainStatusError = undefined;
+        this.settings.domains.domainStatusVerifiedAt = undefined;
+        this.settings.domains.domainStatusCheckedAt = undefined;
+      }
+    }
+
+    this.saveToDisk();
     return this.settings;
   }
 
@@ -230,11 +364,13 @@ export class SystemSettingsService implements OnModuleInit {
       lastUsed: null,
     };
     this.settings.apiAccess.tokens.unshift(tokenRecord);
+    this.saveToDisk();
     return { tokenRecord, rawSecret };
   }
 
   async revokeApiToken(id: string) {
     this.settings.apiAccess.tokens = this.settings.apiAccess.tokens.filter((t) => t.id !== id);
+    this.saveToDisk();
     return { success: true };
   }
 }

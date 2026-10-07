@@ -7,6 +7,7 @@ import { SystemSettingsView } from '@/components/settings/SystemSettingsView';
 import { AuthAndTeamModal } from '@/components/auth/AuthAndTeamModal';
 import { SetupScreen } from '@/components/auth/SetupScreen';
 import { LoginScreen } from '@/components/auth/LoginScreen';
+import { OnboardingDomainScreen } from '@/components/auth/OnboardingDomainScreen';
 import {
   fetchAuthStatus,
   getAuthToken,
@@ -21,6 +22,7 @@ import { Loader2, Server } from 'lucide-react';
 type AuthState =
   | { phase: 'loading' }
   | { phase: 'setup' }
+  | { phase: 'onboarding'; user: AuthUser; instanceName: string }
   | { phase: 'login'; instanceName: string }
   | { phase: 'app'; user: AuthUser; instanceName: string };
 
@@ -97,6 +99,21 @@ export default function Home() {
     restoreView();
   }
 
+  // After the very first account is created we route through a short onboarding
+  // step (connect a domain) before landing on the dashboard.
+  function handleSetupComplete(token: string, user: AuthUser, instanceName: string) {
+    setAuthToken(token);
+    setAuth({ phase: 'onboarding', user, instanceName });
+    setCurrentOrg(instanceName);
+  }
+
+  function finishOnboarding() {
+    if (auth.phase === 'onboarding') {
+      setAuth({ phase: 'app', user: auth.user, instanceName: auth.instanceName });
+      restoreView();
+    }
+  }
+
   async function handleLogout() {
     await logoutFromServer().catch(() => {});
     clearAuthToken();
@@ -161,7 +178,11 @@ export default function Home() {
   }
 
   if (auth.phase === 'setup') {
-    return <SetupScreen onComplete={handleAuthSuccess} />;
+    return <SetupScreen onComplete={handleSetupComplete} />;
+  }
+
+  if (auth.phase === 'onboarding') {
+    return <OnboardingDomainScreen instanceName={auth.instanceName} onDone={finishOnboarding} />;
   }
 
   if (auth.phase === 'login') {

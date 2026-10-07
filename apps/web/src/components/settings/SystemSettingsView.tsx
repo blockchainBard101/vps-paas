@@ -16,6 +16,7 @@ import {
   LogOut,
   Plus,
   Trash2,
+  Pencil,
   Copy,
   Check,
   ExternalLink,
@@ -26,9 +27,13 @@ import {
   Sparkles,
   RefreshCw,
   FolderKanban,
+  Play,
+  Square,
+  Network,
   ArrowLeft,
   Sliders,
   CheckCircle2,
+  Clock,
   AlertCircle,
   KeyRound,
   Eye,
@@ -49,6 +54,12 @@ import {
   saveGitHubOAuthConfig,
   saveGitHubToken,
   disconnectGitHub,
+  fetchDomainStatus,
+  syncDomains,
+  startCaddy,
+  stopCaddy,
+  verifyBaseDomain,
+  DomainStatus,
   GitHubStatus,
   SystemSettingsPayload,
 } from '@/lib/api';
@@ -87,9 +98,18 @@ export function SystemSettingsView({
   const [newTokenRole, setNewTokenRole] = useState<'admin' | 'deploy' | 'readonly'>('deploy');
   const [createdSecret, setCreatedSecret] = useState<string | null>(null);
 
-  // New custom domain state
-  const [newCustomDomain, setNewCustomDomain] = useState('');
-  const [newDomainTarget, setNewDomainTarget] = useState('api-backend');
+  // Edge proxy (Caddy) live status
+  const [domainStatus, setDomainStatus] = useState<DomainStatus | null>(null);
+  const [isSyncingDomains, setIsSyncingDomains] = useState(false);
+  const [isTogglingCaddy, setIsTogglingCaddy] = useState(false);
+  const [domainSyncNotice, setDomainSyncNotice] = useState<string | null>(null);
+
+  // Domain form helpers
+  const [wildcardTouched, setWildcardTouched] = useState(false);
+  const [showIpOverride, setShowIpOverride] = useState(false);
+  const [copiedIp, setCopiedIp] = useState(false);
+  const [isVerifyingBase, setIsVerifyingBase] = useState(false);
+  const [isEditingDomains, setIsEditingDomains] = useState(false);
 
   // GitHub state
   const [gitStatus, setGitStatus] = useState<GitHubStatus | null>(null);
@@ -105,13 +125,115 @@ export function SystemSettingsView({
 
   useEffect(() => {
     loadSettings();
+    loadDomainStatus();
   }, []);
+
+  // While on the Domains tab, quietly refresh the dashboard-domain status so it
+  // flips to "verified" live — merging only the status fields so it never
+  // clobbers text the user is currently editing.
+  useEffect(() => {
+    if (activeTab !== 'domains') return;
+    const t = setInterval(() => {
+      fetchSystemSettings()
+        .then((data) =>
+          setSettings((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  domains: {
+                    ...prev.domains,
+                    domainStatus: data.domains.domainStatus,
+                    domainStatusCheckedAt: data.domains.domainStatusCheckedAt,
+                    domainStatusVerifiedAt: data.domains.domainStatusVerifiedAt,
+                    domainStatusError: data.domains.domainStatusError,
+                  },
+                }
+              : data,
+          ),
+        )
+        .catch(() => {});
+    }, 10000);
+    return () => clearInterval(t);
+  }, [activeTab]);
+
+  async function loadDomainStatus() {
+    try {
+      setDomainStatus(await fetchDomainStatus());
+    } catch {
+      setDomainStatus(null);
+    }
+  }
+
+  async function handleSyncDomains() {
+    setIsSyncingDomains(true);
+    setDomainSyncNotice(null);
+    try {
+      const res = await syncDomains();
+      setDomainSyncNotice(
+        res.applied ? 'Routes pushed to the Caddy edge proxy.' : `Stored in control plane (${res.error || 'Caddy unreachable'}).`,
+      );
+      await loadDomainStatus();
+    } catch (e: any) {
+      setDomainSyncNotice(e?.message || 'Sync failed');
+    } finally {
+      setIsSyncingDomains(false);
+      setTimeout(() => setDomainSyncNotice(null), 4000);
+    }
+  }
+
+  async function handleToggleCaddy() {
+    if (!domainStatus) return;
+    setIsTogglingCaddy(true);
+    setDomainSyncNotice(null);
+    try {
+      if (domainStatus.caddyRunning) {
+        await stopCaddy();
+        setDomainSyncNotice('Edge proxy stopped.');
+      } else {
+        const res = await startCaddy();
+        if (res.running && res.ready) {
+          setDomainSyncNotice(
+            res.applied ? 'Caddy edge proxy started and routes pushed.' : `Caddy running (${res.error || 'routes stored'}).`,
+          );
+        } else {
+          setDomainSyncNotice(`Could not start Caddy: ${res.error || 'unknown error'}`);
+        }
+      }
+      await loadDomainStatus();
+    } catch (e: any) {
+      setDomainSyncNotice(e?.message || 'Caddy action failed');
+    } finally {
+      setIsTogglingCaddy(false);
+      setTimeout(() => setDomainSyncNotice(null), 5000);
+    }
+  }
+
+  async function handleVerifyBaseDomain() {
+    setIsVerifyingBase(true);
+    try {
+      await verifyBaseDomain();
+      const data = await fetchSystemSettings();
+      setSettings(data);
+    } catch {
+    } finally {
+      setIsVerifyingBase(false);
+    }
+  }
+
+  async function handleSaveDomains() {
+    if (!settings) return;
+    await handleSaveSettings(settings);
+    // Lock the fields again until the user clicks "Edit".
+    setIsEditingDomains(false);
+  }
 
   async function loadSettings() {
     setLoading(true);
     try {
       const data = await fetchSystemSettings();
       setSettings(data);
+      // Lock the domain fields when one is already saved (must click "Edit").
+      setIsEditingDomains(!data.domains.serverDomain);
       const gs = await fetchGitHubStatus().catch(() => null);
       if (gs) setGitStatus(gs);
       const oauthInfo = await fetchGitHubOAuthUrl().catch(() => null);
@@ -122,8 +244,7 @@ export function SystemSettingsView({
         domains: {
           serverDomain: '',
           wildcardDomain: '',
-          sslProvider: 'letsencrypt',
-          acmeEmail: '',
+          serverIp: '',
           proxyType: 'caddy',
           customDomains: [],
         },
@@ -175,7 +296,7 @@ export function SystemSettingsView({
         },
         deployments: {
           maxConcurrency: 4,
-          buildTimeoutMinutes: 15,
+          buildTimeoutMinutes: 30,
           autoCancelOutdatedBuilds: true,
           retentionDays: 30,
         },
@@ -187,6 +308,7 @@ export function SystemSettingsView({
           autoUpdateControlPlane: false,
         },
       });
+      setIsEditingDomains(true);
     } finally {
       setLoading(false);
     }
@@ -346,29 +468,6 @@ export function SystemSettingsView({
     } catch {}
   }
 
-  async function handleAddDomain(e: React.FormEvent) {
-    e.preventDefault();
-    if (!newCustomDomain.trim() || !settings) return;
-
-    const updatedDomains = [
-      ...settings.domains.customDomains,
-      {
-        domain: newCustomDomain.trim(),
-        targetService: newDomainTarget,
-        status: 'active' as const,
-        sslValidUntil: new Date(Date.now() + 86400000 * 90).toISOString(),
-      },
-    ];
-
-    await handleSaveSettings({
-      domains: {
-        ...settings.domains,
-        customDomains: updatedDomains,
-      },
-    });
-    setNewCustomDomain('');
-  }
-
   const menuItems = [
     { id: 'domains', label: 'Domains', icon: Globe },
     { id: 'dns', label: 'DNS', icon: Binary },
@@ -508,154 +607,276 @@ export function SystemSettingsView({
               </p>
             </div>
 
-            {/* Server Domain Card */}
-            <div className="p-6 rounded-2xl border border-zinc-800 bg-zinc-900/30 space-y-4">
-              <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
-                <Globe className="w-4 h-4 text-indigo-400" />
-                <span>Base Ingress Configuration</span>
-              </h3>
+            {/* Domain & Routing Card */}
+            <div className="p-6 rounded-2xl border border-zinc-800 bg-zinc-900/30 space-y-5">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
+                  <Globe className="w-4 h-4 text-indigo-400" />
+                  <span>Domain &amp; Routing</span>
+                </h3>
+                <p className="text-xs text-zinc-400 mt-1">
+                  Set your dashboard domain and wildcard — every deployed service gets{' '}
+                  <code className="text-indigo-300 font-mono">&lt;service&gt;.yourdomain.com</code> automatically.
+                </p>
+              </div>
+
+              {/* DNS target */}
+              <div className="p-4 rounded-xl border border-indigo-500/20 bg-indigo-500/5 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <Network className="w-4 h-4 text-indigo-400 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="text-[10px] uppercase tracking-wider text-indigo-300 font-mono font-semibold">
+                      DNS Target · point an A record here
+                    </div>
+                    {showIpOverride ? (
+                      <input
+                        type="text"
+                        value={settings.domains.serverIp}
+                        onChange={(e) =>
+                          setSettings({
+                            ...settings,
+                            domains: { ...settings.domains, serverIp: e.target.value },
+                          })
+                        }
+                        placeholder={domainStatus?.serverIp || 'auto-detected'}
+                        className="mt-1 w-full px-3 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500"
+                      />
+                    ) : (
+                      <div className="font-mono text-sm font-semibold text-zinc-100 mt-0.5 truncate">
+                        {settings.domains.serverIp || domainStatus?.serverIp || 'detecting…'}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => {
+                      try {
+                        navigator.clipboard.writeText(
+                          settings.domains.serverIp || domainStatus?.serverIp || '',
+                        );
+                        setCopiedIp(true);
+                        setTimeout(() => setCopiedIp(false), 2000);
+                      } catch {}
+                    }}
+                    className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-700 rounded-lg text-xs font-mono flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {copiedIp ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedIp ? 'Copied' : 'Copy IP'}</span>
+                  </button>
+                  <button
+                    onClick={() => setShowIpOverride((v) => !v)}
+                    title="Override the auto-detected IP"
+                    className="px-2.5 py-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-lg text-xs font-mono cursor-pointer"
+                  >
+                    {showIpOverride ? 'Done' : 'Change'}
+                  </button>
+                </div>
+              </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="text-xs font-mono text-zinc-400 block mb-1.5">
-                    Server Control Plane FQDN
-                  </label>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-mono text-zinc-400">Dashboard Domain</label>
+                    {settings.domains.serverDomain &&
+                      (settings.domains.domainStatus === 'verified' ? (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono border bg-emerald-500/10 border-emerald-500/30 text-emerald-400 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" /> Verified
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono border bg-amber-500/10 border-amber-500/30 text-amber-400 flex items-center gap-1">
+                          <Clock className="w-3 h-3" /> Pending
+                        </span>
+                      ))}
+                  </div>
                   <input
                     type="text"
                     value={settings.domains.serverDomain}
-                    onChange={(e) =>
-                      setSettings({
-                        ...settings,
-                        domains: { ...settings.domains, serverDomain: e.target.value },
-                      })
-                    }
-                    className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500"
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      const base = raw
+                        .trim()
+                        .toLowerCase()
+                        .replace(/^https?:\/\//, '')
+                        .replace(/^\*\./, '')
+                        .replace(/\/.*$/, '');
+                      setSettings((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              domains: {
+                                ...prev.domains,
+                                serverDomain: raw,
+                                // Auto-fill the wildcard from the domain unless the user edited it.
+                                wildcardDomain: wildcardTouched
+                                  ? prev.domains.wildcardDomain
+                                  : base
+                                    ? `*.${base}`
+                                    : '',
+                              },
+                            }
+                          : prev,
+                      );
+                    }}
+                    placeholder="yourdomain.com"
+                    disabled={!isEditingDomains}
+                    className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500 disabled:opacity-60 disabled:cursor-not-allowed"
                   />
+                  <div className="flex items-center justify-between gap-2 mt-1">
+                    <p className="text-[10px] text-zinc-500 font-mono">
+                      {settings.domains.serverDomain &&
+                      settings.domains.domainStatus !== 'verified' &&
+                      settings.domains.domainStatusError
+                        ? settings.domains.domainStatusError
+                        : 'The domain you use to reach this dashboard.'}
+                    </p>
+                    {settings.domains.serverDomain && settings.domains.domainStatus !== 'verified' && (
+                      <button
+                        onClick={handleVerifyBaseDomain}
+                        disabled={isVerifyingBase}
+                        className="text-[10px] font-mono text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer shrink-0 disabled:opacity-50"
+                      >
+                        {isVerifyingBase ? (
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <ShieldCheck className="w-3 h-3" />
+                        )}
+                        Verify now
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <div>
-                  <label className="text-xs font-mono text-zinc-400 block mb-1.5">
-                    Wildcard Subdomain Template
-                  </label>
+                  <label className="text-xs font-mono text-zinc-400 block mb-1.5">Wildcard Subdomains</label>
                   <input
                     type="text"
                     value={settings.domains.wildcardDomain}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      setWildcardTouched(true);
                       setSettings({
                         ...settings,
                         domains: { ...settings.domains, wildcardDomain: e.target.value },
-                      })
-                    }
-                    className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500"
+                      });
+                    }}
+                    placeholder="*.yourdomain.com"
+                    disabled={!isEditingDomains}
+                    className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500 disabled:opacity-60 disabled:cursor-not-allowed"
                   />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                <div>
-                  <label className="text-xs font-mono text-zinc-400 block mb-1.5">
-                    ACME SSL Provider
-                  </label>
-                  <select
-                    value={settings.domains.sslProvider}
-                    onChange={(e) =>
-                      handleSaveSettings({
-                        domains: {
-                          ...settings.domains,
-                          sslProvider: e.target.value as any,
-                        },
-                      })
-                    }
-                    className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
-                  >
-                    <option value="letsencrypt">Let&apos;s Encrypt (Production ACME)</option>
-                    <option value="zerossl">ZeroSSL</option>
-                    <option value="selfsigned">Self-Signed (Local Development)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-xs font-mono text-zinc-400 block mb-1.5">
-                    Notification Email (ACME Expiry)
-                  </label>
-                  <input
-                    type="email"
-                    value={settings.domains.acmeEmail}
-                    onChange={(e) =>
-                      setSettings({
-                        ...settings,
-                        domains: { ...settings.domains, acmeEmail: e.target.value },
-                      })
-                    }
-                    className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-              </div>
-
-              <div className="pt-2 flex justify-end">
-                <button
-                  onClick={() => handleSaveSettings(settings)}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold transition-all cursor-pointer"
-                >
-                  Save Ingress Settings
-                </button>
-              </div>
-            </div>
-
-            {/* Custom Domains Table */}
-            <div className="p-6 rounded-2xl border border-zinc-800 bg-zinc-900/30 space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-sm font-semibold text-zinc-200">Custom Domain Mappings</h3>
-                  <p className="text-xs text-zinc-400 mt-0.5">
-                    Domains routed through Caddy edge proxy with automated SSL.
+                  <p className="text-[10px] text-zinc-500 font-mono mt-1">
+                    Auto-filled from your dashboard domain — routes any service subdomain.
                   </p>
                 </div>
               </div>
 
-              <div className="border border-zinc-800 rounded-xl overflow-hidden divide-y divide-zinc-800 bg-zinc-950/60 font-mono text-xs">
-                {settings.domains.customDomains.map((d, idx) => (
-                  <div key={idx} className="p-3.5 flex items-center justify-between">
-                    <div>
-                      <div className="font-semibold text-zinc-200">{d.domain}</div>
-                      <div className="text-[10px] text-zinc-500 mt-0.5">
-                        Target Service: <span className="text-indigo-400">{d.targetService}</span> • TLS
-                        Valid until: {new Date(d.sslValidUntil).toLocaleDateString()}
-                      </div>
-                    </div>
-                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px]">
-                      Active & Certified
-                    </span>
-                  </div>
-                ))}
-
-                {/* Add Custom Domain Form */}
-                <form onSubmit={handleAddDomain} className="p-3 bg-zinc-900/40 flex items-center gap-2">
-                  <input
-                    type="text"
-                    required
-                    value={newCustomDomain}
-                    onChange={(e) => setNewCustomDomain(e.target.value)}
-                    placeholder="api.yourbrand.com"
-                    className="flex-1 px-3 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
-                  />
-                  <select
-                    value={newDomainTarget}
-                    onChange={(e) => setNewDomainTarget(e.target.value)}
-                    className="px-3 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
-                  >
-                    <option value="api-backend">api-backend (:3000)</option>
-                    <option value="web-frontend">web-frontend (:3001)</option>
-                    <option value="storefront-web">storefront-web (:8000)</option>
-                  </select>
+              <div className="pt-2 flex justify-end">
+                {isEditingDomains ? (
                   <button
-                    type="submit"
-                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium flex items-center gap-1 cursor-pointer"
+                    onClick={handleSaveDomains}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold transition-all cursor-pointer"
                   >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Add</span>
+                    Save Changes
                   </button>
-                </form>
+                ) : (
+                  <button
+                    onClick={() => setIsEditingDomains(true)}
+                    className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                    Edit
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Edge Proxy (Caddy) Live Status */}
+            <div className="p-6 rounded-2xl border border-zinc-800 bg-zinc-900/30 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-zinc-200">Edge Proxy & Live Routes</h3>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Caddy reverse-proxies each mapped host to its service container. Per-service custom domains are managed in the service drawer.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`px-2.5 py-1 rounded-full text-[10px] font-mono border flex items-center gap-1.5 ${
+                      domainStatus?.caddyAvailable
+                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                        : domainStatus?.caddyRunning
+                          ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400'
+                          : 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        domainStatus?.caddyAvailable
+                          ? 'bg-emerald-400'
+                          : domainStatus?.caddyRunning
+                            ? 'bg-indigo-400 animate-pulse'
+                            : 'bg-amber-400'
+                      }`}
+                    />
+                    {domainStatus?.caddyAvailable ? 'Caddy online' : domainStatus?.caddyRunning ? 'Caddy starting…' : 'Caddy stopped'}
+                  </span>
+                  <button
+                    onClick={handleToggleCaddy}
+                    disabled={isTogglingCaddy}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+                      domainStatus?.caddyRunning
+                        ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'
+                        : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                    }`}
+                  >
+                    {isTogglingCaddy ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : domainStatus?.caddyRunning ? (
+                      <Square className="w-3.5 h-3.5" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5" />
+                    )}
+                    <span>{domainStatus?.caddyRunning ? 'Stop edge proxy' : 'Start edge proxy'}</span>
+                  </button>
+                  <button
+                    onClick={handleSyncDomains}
+                    disabled={isSyncingDomains}
+                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isSyncingDomains ? 'animate-spin' : ''}`} />
+                    <span>Sync routes</span>
+                  </button>
+                </div>
+              </div>
+
+              {domainStatus?.adminUrl && (
+                <div className="text-[10px] font-mono text-zinc-500">
+                  Admin API: <span className="text-zinc-400">{domainStatus.adminUrl}</span>
+                </div>
+              )}
+
+              {domainSyncNotice && (
+                <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] font-mono text-zinc-300 flex items-center gap-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>{domainSyncNotice}</span>
+                </div>
+              )}
+
+              <div className="border border-zinc-800 rounded-xl overflow-hidden divide-y divide-zinc-800 bg-zinc-950/60 font-mono text-xs">
+                {domainStatus && domainStatus.routes.length > 0 ? (
+                  domainStatus.routes.map((r, idx) => (
+                    <div key={idx} className="p-3.5 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Globe className="w-3.5 h-3.5 text-indigo-400" />
+                        <span className="font-semibold text-zinc-200">{r.host}</span>
+                      </div>
+                      <span className="text-[10px] text-zinc-500">→ {r.target}</span>
+                    </div>
+                  ))
+                ) : (
+                  <div className="p-3.5 text-[11px] text-zinc-500">
+                    No routes yet. Set a base server domain above, deploy a service, or add a custom domain in the service drawer.
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -1519,6 +1740,36 @@ export function SystemSettingsView({
                     className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-200"
                   />
                 </div>
+
+                <div>
+                  <label className="text-xs font-mono text-zinc-400 block mb-1.5">
+                    History &amp; Log Retention (Days)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={365}
+                    value={settings.deployments.retentionDays}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        deployments: {
+                          ...settings.deployments,
+                          retentionDays: parseInt(e.target.value, 10),
+                        },
+                      })
+                    }
+                    className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-200"
+                  />
+                  <p className="text-[10px] text-zinc-500 mt-1 font-mono">
+                    Deployment history and logs older than this are auto-deleted (keeps the data dir small).
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-emerald-950/20 border border-emerald-500/20 text-[11px] font-mono text-emerald-300/90">
+                🧹 Automatic disk protection is on: old build images are pruned after each deploy, dangling images and the
+                build cache (≤10GB) are reclaimed every 6h, and deployment logs respect the retention above.
               </div>
 
               <div className="flex justify-end pt-2">

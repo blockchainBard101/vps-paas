@@ -1,6 +1,21 @@
 import { Injectable, BadRequestException, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { DockerService } from './docker.service.js';
+import { CaddyService, CaddyRoute } from './caddy.service.js';
+import { SystemSettingsService } from './system-settings.service.js';
+import { ensureDataDir } from './config/paths.js';
 import crypto from 'node:crypto';
+import dns from 'node:dns';
+import fs from 'node:fs';
+import path from 'node:path';
+
+export interface DomainStatusRecord {
+  status: 'pending' | 'verified';
+  targetIp?: string;
+  verifiedAt?: string;
+  lastCheckedAt?: string;
+  lastError?: string;
+  createdAt: string;
+}
 
 export interface ServiceRecord {
   id: string;
@@ -15,11 +30,15 @@ export interface ServiceRecord {
   gitBranch?: string;
   subfolder?: string;
   dockerfilePath?: string;
-  buildMethod?: 'auto' | 'railpack' | 'dockerfile';
+  buildMethod?: 'auto' | 'railpack' | 'dockerfile' | 'slim';
   runtimeMode?: 'web' | 'worker';
   installCommand?: string;
   buildCommand?: string;
   startCommand?: string;
+  systemPackages?: string;
+  nodeVersion?: string;
+  domains?: string[];
+  domainStatus?: Record<string, DomainStatusRecord>;
   env: Record<string, string>;
   createdAt: string;
   startedAt?: string;
@@ -28,59 +47,210 @@ export interface ServiceRecord {
 @Injectable()
 export class ServicesService implements OnModuleInit {
   private services: Map<string, ServiceRecord> = new Map();
+  private storagePath: string;
 
-  constructor(private readonly dockerService: DockerService) {}
+  constructor(
+    private readonly dockerService: DockerService,
+    private readonly caddyService: CaddyService,
+    private readonly systemSettingsService: SystemSettingsService,
+  ) {
+    this.storagePath = path.join(ensureDataDir(), 'services.json');
+  }
 
   async onModuleInit() {
+    // The control plane owns the durable service definitions (env + settings);
+    // Docker is the runtime and only supplies live container state.
+    this.loadFromDisk();
     await this.discoverExisting();
+    // Best-effort: re-push all known routes to Caddy so domain routing
+    // self-heals after a control-plane or edge-proxy restart.
+    this.syncCaddy().catch(() => {});
+    this.startDomainVerifier();
+  }
+
+  /**
+   * Background DNS verifier: periodically re-checks PENDING domains so their
+   * status is correct even when no UI is watching. Runs every 45s, only touches
+   * domains that are still pending, and skips ones checked very recently so DNS
+   * has time to propagate.
+   */
+  private startDomainVerifier(): void {
+    const INTERVAL_MS = 45000;
+    const timer = setInterval(() => {
+      this.verifyPendingDomains().catch(() => {});
+    }, INTERVAL_MS);
+    // Don't keep the process alive solely for this timer.
+    (timer as any).unref?.();
+  }
+
+  private async verifyPendingDomains(): Promise<void> {
+    const now = Date.now();
+    let changed = false;
+    const statusSnapshot = (s: ServiceRecord) =>
+      JSON.stringify(
+        Object.fromEntries((s.domains || []).map((h) => [h, s.domainStatus?.[h]?.status || 'pending'])),
+      );
+    for (const service of this.services.values()) {
+      const hosts = (service.domains || []).filter((h) => {
+        const st = service.domainStatus?.[h];
+        if (st?.status === 'verified') return false;
+        const checkedAt = st?.lastCheckedAt ? new Date(st.lastCheckedAt).getTime() : 0;
+        if (checkedAt && now - checkedAt < 20000) return false;
+        return true;
+      });
+      if (hosts.length === 0) continue;
+      const before = statusSnapshot(service);
+      await this.verifyDomains(service);
+      if (statusSnapshot(service) !== before) changed = true;
+    }
+    // Only persist when a domain actually flipped (avoids constant writes).
+    if (changed) this.saveToDisk();
+
+    // Also re-check the global dashboard domain while it's still pending.
+    try {
+      const domains = this.systemSettingsService.getDomains();
+      const host = (domains.serverDomain || '').trim();
+      const checkedAt = domains.domainStatusCheckedAt
+        ? new Date(domains.domainStatusCheckedAt).getTime()
+        : 0;
+      if (host && domains.domainStatus !== 'verified' && (!checkedAt || now - checkedAt >= 20000)) {
+        await this.verifyServerDomain();
+      }
+    } catch {}
+  }
+
+  /** System/container env vars that are never treated as user configuration. */
+  private isSystemEnvKey(key: string): boolean {
+    const u = (key || '').toUpperCase();
+    if (
+      [
+        'PATH', 'HOME', 'PWD', 'OLDPWD', 'SHLVL', '_', 'USER', 'LOGNAME', 'TERM', 'ENV', 'CI', 'HOSTNAME',
+        'LANG', 'LC_ALL', 'LC_CTYPE', 'QTDIR', 'CPATH', 'LIBRARY_PATH', 'LD_LIBRARY_PATH',
+        'GIT_SSL_CAINFO', 'NIX_SSL_CERT_FILE', 'SOURCE_DATE_EPOCH',
+        'NODE_ENV', 'NODE_VERSION', 'YARN_VERSION', 'NPM_CONFIG_PRODUCTION',
+      ].includes(u)
+    ) {
+      return true;
+    }
+    return (
+      u.startsWith('NIX') || u.startsWith('NPM_') || u.startsWith('YARN_') || u.startsWith('RV_') ||
+      u.startsWith('PKG_') || u.startsWith('LD_') || u.startsWith('GEM_') || u.startsWith('PIP_') ||
+      u.startsWith('NGINX') || u.startsWith('NJS_') || u.startsWith('ACME_') || u.startsWith('DYNPKG_')
+    );
+  }
+
+  /** Only the durable, control-plane-owned fields are persisted to disk. */
+  private toDurable(rec: ServiceRecord) {
+    return {
+      id: rec.id,
+      name: rec.name,
+      image: rec.image,
+      gitRepo: rec.gitRepo,
+      gitBranch: rec.gitBranch,
+      subfolder: rec.subfolder,
+      dockerfilePath: rec.dockerfilePath,
+      buildMethod: rec.buildMethod,
+      runtimeMode: rec.runtimeMode,
+      installCommand: rec.installCommand,
+      buildCommand: rec.buildCommand,
+      startCommand: rec.startCommand,
+      systemPackages: rec.systemPackages,
+      nodeVersion: rec.nodeVersion,
+      domains: rec.domains || [],
+      domainStatus: rec.domainStatus || {},
+      env: rec.env,
+      createdAt: rec.createdAt,
+    };
+  }
+
+  private loadFromDisk() {
+    try {
+      if (!fs.existsSync(this.storagePath)) return;
+      const list = JSON.parse(fs.readFileSync(this.storagePath, 'utf8'));
+      if (!Array.isArray(list)) return;
+      for (const item of list) {
+        if (!item || !item.id) continue;
+        const safeName = String(item.name || 'service').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+        this.services.set(item.id, {
+          ...item,
+          containerId: '',
+          containerName: `paas-svc-${safeName}-${item.id}`,
+          status: 'stopped',
+          domains: item.domains || [],
+          domainStatus: item.domainStatus || {},
+          // Defensively strip any system/container vars from persisted env.
+          env: Object.fromEntries(
+            Object.entries(item.env || {}).filter(([k]) => !this.isSystemEnvKey(k)),
+          ),
+        } as ServiceRecord);
+      }
+      console.log(`[ServicesService] Loaded ${this.services.size} service(s) from ${this.storagePath}`);
+    } catch (e: any) {
+      console.warn('[ServicesService] Failed to load services.json:', e?.message);
+    }
+  }
+
+  private saveToDisk() {
+    try {
+      const dir = path.dirname(this.storagePath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const list = Array.from(this.services.values()).map((r) => this.toDurable(r));
+      fs.writeFileSync(this.storagePath, JSON.stringify(list, null, 2), 'utf8');
+    } catch (e: any) {
+      console.warn('[ServicesService] Failed to save services.json:', e?.message);
+    }
   }
 
   async discoverExisting() {
     try {
       const containers = await this.dockerService.client.listContainers({ all: true });
+      let changed = false;
+
       for (const info of containers) {
         const match = info.Names.find((n) => n.startsWith('/paas-svc-'));
-        if (match) {
-          const containerName = match.replace(/^\//, '');
-          const parts = containerName.split('-');
-          const serviceId = parts[parts.length - 1];
-          const svcName = parts.slice(2, parts.length - 1).join('-') || 'service';
-          const container = this.dockerService.client.getContainer(info.Id);
-          const inspect = await container.inspect();
+        if (!match) continue;
+        const containerName = match.replace(/^\//, '');
+        const parts = containerName.split('-');
+        const serviceId = parts[parts.length - 1];
+        const svcName = parts.slice(2, parts.length - 1).join('-') || 'service';
+        const inspect = await this.dockerService.client.getContainer(info.Id).inspect();
 
-          const envMap: Record<string, string> = {};
+        let hostPort: number | undefined;
+        for (const key of Object.keys(inspect.NetworkSettings.Ports || {})) {
+          const binding = inspect.NetworkSettings.Ports[key];
+          if (binding && binding[0]) {
+            hostPort = parseInt(binding[0].HostPort, 10);
+            break;
+          }
+        }
+        const exposedKeys = Object.keys(inspect.Config.ExposedPorts || {});
+        let internalPort: number | undefined;
+        if (exposedKeys.length > 0) internalPort = parseInt(exposedKeys[0].replace(/\/tcp$/, ''), 10);
+
+        const existing = this.services.get(serviceId);
+        if (existing) {
+          // Known service → keep the control-plane-owned env/settings intact;
+          // refresh live runtime fields only.
+          existing.containerId = info.Id;
+          existing.containerName = containerName;
+          existing.image = inspect.Config.Image || existing.image;
+          existing.status = info.State === 'running' ? 'running' : 'stopped';
+          existing.port = hostPort ?? existing.port;
+          existing.internalPort = internalPort ?? existing.internalPort;
+          existing.startedAt = inspect.State?.StartedAt || existing.startedAt;
+          changed = true;
+        } else {
+          // Unknown/external container → import it with a clean (filtered) env.
+          const rawEnv: Record<string, string> = {};
           for (const e of inspect.Config.Env || []) {
             const [k, ...v] = e.split('=');
-            envMap[k] = v.join('=');
+            rawEnv[k] = v.join('=');
           }
-
-          let hostPort: number | undefined;
-          for (const key of Object.keys(inspect.NetworkSettings.Ports || {})) {
-            const binding = inspect.NetworkSettings.Ports[key];
-            if (binding && binding[0]) {
-              hostPort = parseInt(binding[0].HostPort, 10);
-              break;
-            }
+          const env: Record<string, string> = {};
+          for (const [k, v] of Object.entries(rawEnv)) {
+            if (!this.isSystemEnvKey(k)) env[k] = v;
           }
-
-          const exposedKeys = Object.keys(inspect.Config.ExposedPorts || {});
-          let internalPort: number | undefined;
-          if (exposedKeys.length > 0) {
-            internalPort = parseInt(exposedKeys[0].replace(/\/tcp$/, ''), 10);
-          } else if (envMap['PORT']) {
-            internalPort = parseInt(envMap['PORT'], 10);
-          }
-
-          const gitRepo = inspect.Config.Labels?.['paas.git.repo'] || envMap['GIT_REPO'] || undefined;
-          const gitBranch = inspect.Config.Labels?.['paas.git.branch'] || envMap['GIT_BRANCH'] || undefined;
-          const subfolder = inspect.Config.Labels?.['paas.git.subfolder'] || envMap['GIT_SUBFOLDER'] || undefined;
-          const dockerfilePath = inspect.Config.Labels?.['paas.git.dockerfile_path'] || envMap['DOCKERFILE_PATH'] || envMap['GIT_DOCKERFILE_PATH'] || undefined;
-          const buildMethod = (inspect.Config.Labels?.['paas.git.build_method'] || envMap['BUILD_METHOD'] || undefined) as any;
-          const runtimeMode = (inspect.Config.Labels?.['paas.runtime_mode'] || envMap['RUNTIME_MODE'] || 'web') as any;
-          const installCommand = inspect.Config.Labels?.['paas.install_cmd'] || envMap['INSTALL_COMMAND'] || undefined;
-          const buildCommand = inspect.Config.Labels?.['paas.build_cmd'] || envMap['BUILD_COMMAND'] || undefined;
-          const startCommand = inspect.Config.Labels?.['paas.start_cmd'] || envMap['START_COMMAND'] || undefined;
-
+          const L = inspect.Config.Labels || {};
           const record: ServiceRecord = {
             id: serviceId,
             name: svcName,
@@ -90,24 +260,28 @@ export class ServicesService implements OnModuleInit {
             status: info.State === 'running' ? 'running' : 'stopped',
             port: hostPort,
             internalPort: internalPort || hostPort,
-            gitRepo,
-            gitBranch,
-            subfolder,
-            dockerfilePath,
-            buildMethod,
-            runtimeMode,
-            installCommand,
-            buildCommand,
-            startCommand,
-            env: envMap,
+            gitRepo: L['paas.git.repo'] || undefined,
+            gitBranch: L['paas.git.branch'] || undefined,
+            subfolder: L['paas.git.subfolder'] || undefined,
+            dockerfilePath: L['paas.git.dockerfile_path'] || undefined,
+            buildMethod: (L['paas.git.build_method'] || undefined) as any,
+            runtimeMode: (L['paas.runtime_mode'] || 'web') as any,
+            installCommand: L['paas.install_cmd'] || undefined,
+            buildCommand: L['paas.build_cmd'] || undefined,
+            startCommand: L['paas.start_cmd'] || undefined,
+            systemPackages: L['paas.sys_packages'] || undefined,
+            nodeVersion: L['paas.node_version'] || undefined,
+            env,
             createdAt: inspect.Created,
             startedAt: inspect.State?.StartedAt || undefined,
           };
-
           this.services.set(serviceId, record);
-          console.log(`[ServicesService] Discovered existing service: ${svcName} (${serviceId})`);
+          changed = true;
+          console.log(`[ServicesService] Imported existing service: ${svcName} (${serviceId})`);
         }
       }
+
+      if (changed) this.saveToDisk();
     } catch (e: any) {
       console.warn(`[ServicesService] Discovery notice: ${e.message}`);
     }
@@ -148,18 +322,27 @@ export class ServicesService implements OnModuleInit {
     gitBranch?: string;
     subfolder?: string;
     dockerfilePath?: string;
-    buildMethod?: 'auto' | 'railpack' | 'dockerfile';
+    buildMethod?: 'auto' | 'railpack' | 'dockerfile' | 'slim';
     runtimeMode?: 'web' | 'worker';
     installCommand?: string;
     buildCommand?: string;
     startCommand?: string;
+    systemPackages?: string;
+    nodeVersion?: string;
+    domains?: string[];
     command?: string[];
   }): Promise<ServiceRecord> {
     const serviceId = options.id || crypto.randomBytes(4).toString('hex');
     const safeName = options.name.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
     const containerName = `paas-svc-${safeName}-${serviceId}`;
     const image = options.image || 'nginx:alpine';
-    const envVars = options.env || {};
+    const envVars: Record<string, string> = { ...(options.env || {}) };
+    // Keep the app's listening port in sync with the port we expose and host-map,
+    // so the edge route, the published port and the app itself all agree.
+    const exposedPort = options.port || 80;
+    if (options.runtimeMode !== 'worker') {
+      envVars.PORT = String(exposedPort);
+    }
 
     const envArray = Object.entries(envVars).map(([k, v]) => `${k}=${v}`);
 
@@ -187,7 +370,6 @@ export class ServicesService implements OnModuleInit {
         await existingContainer.remove({ force: true }).catch(() => {});
       } catch {}
 
-      const exposedPort = options.port || 80;
       const portKey = `${exposedPort}/tcp`;
 
       const container = await this.dockerService.client.createContainer({
@@ -216,6 +398,8 @@ export class ServicesService implements OnModuleInit {
           ...(options.installCommand ? { 'paas.install_cmd': options.installCommand } : {}),
           ...(options.buildCommand ? { 'paas.build_cmd': options.buildCommand } : {}),
           ...(options.startCommand ? { 'paas.start_cmd': options.startCommand } : {}),
+          ...(options.systemPackages ? { 'paas.sys_packages': options.systemPackages } : {}),
+          ...(options.nodeVersion ? { 'paas.node_version': options.nodeVersion } : {}),
         },
       });
 
@@ -244,12 +428,36 @@ export class ServicesService implements OnModuleInit {
         installCommand: options.installCommand,
         buildCommand: options.buildCommand,
         startCommand: options.startCommand,
+        systemPackages: options.systemPackages,
+        nodeVersion: options.nodeVersion,
+        domains:
+          options.domains ||
+          (options.id ? this.services.get(options.id)?.domains : undefined) ||
+          this.defaultDomains(safeName),
         env: envVars,
         createdAt: new Date().toISOString(),
         startedAt: new Date().toISOString(),
       };
 
+      // Preserve verification state across redeploys; mark newly-assigned
+      // domains as pending until their DNS points at this server.
+      const prevRecord = options.id ? this.services.get(options.id) : undefined;
+      const statusMap: Record<string, DomainStatusRecord> = { ...(prevRecord?.domainStatus || {}) };
+      const targetIp = this.systemSettingsService.getServerIp();
+      for (const host of record.domains || []) {
+        if (!statusMap[host]) {
+          statusMap[host] = {
+            status: 'pending',
+            targetIp,
+            createdAt: new Date().toISOString(),
+          };
+        }
+      }
+      record.domainStatus = statusMap;
+
       this.services.set(serviceId, record);
+      this.saveToDisk();
+      this.syncCaddy().catch(() => {});
       return record;
     } catch (err: any) {
       throw new BadRequestException(`Failed to deploy service: ${err.message}`);
@@ -261,6 +469,8 @@ export class ServicesService implements OnModuleInit {
     const container = this.dockerService.client.getContainer(service.containerId);
     await container.stop();
     service.status = 'stopped';
+    this.saveToDisk();
+    this.syncCaddy().catch(() => {});
     return service;
   }
 
@@ -269,6 +479,7 @@ export class ServicesService implements OnModuleInit {
     const container = this.dockerService.client.getContainer(service.containerId);
     await container.restart();
     service.status = 'running';
+    this.syncCaddy().catch(() => {});
     return service;
   }
 
@@ -280,27 +491,243 @@ export class ServicesService implements OnModuleInit {
     } catch {}
     await container.remove({ force: true });
     this.services.delete(id);
+    this.saveToDisk();
+    this.syncCaddy().catch(() => {});
     return { success: true };
   }
 
   async updateEnvironment(id: string, env: Record<string, string>): Promise<ServiceRecord> {
     const service = await this.getService(id);
-    service.env = { ...service.env, ...env };
-    // To apply new env vars in Docker, recreate or restart
+    // Platform-managed keys live alongside user vars; preserve them so an env
+    // edit replaces the user's variables (including deletions) without wiping them.
+    const PLATFORM_KEYS = new Set([
+      'PORT', 'GIT_REPO', 'GIT_BRANCH', 'GIT_SUBFOLDER', 'GIT_DOCKERFILE_PATH', 'DOCKERFILE_PATH',
+      'BUILD_METHOD', 'RUNTIME_MODE', 'INSTALL_COMMAND', 'BUILD_COMMAND', 'START_COMMAND',
+      'SYSTEM_PACKAGES', 'NODE_VERSION',
+    ]);
+    const next: Record<string, string> = {};
+    for (const [k, v] of Object.entries(service.env || {})) {
+      if (PLATFORM_KEYS.has(k)) next[k] = v;
+    }
+    Object.assign(next, env);
+    service.env = next;
+    // Applied to the container on next redeploy.
+    this.saveToDisk();
+    this.syncCaddy().catch(() => {});
     return service;
+  }
+
+  /** Default auto-assigned subdomains for a service, e.g. myapp.example.com. */
+  private defaultDomains(safeName: string): string[] {
+    const base = this.systemSettingsService.getServerDomain();
+    return base ? [`${safeName}.${base}`] : [];
+  }
+
+  /** Add a custom domain to a service and re-sync the edge proxy. */
+  async addDomain(id: string, domain: string): Promise<ServiceRecord> {
+    const service = await this.getService(id);
+    const clean = (domain || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/\/.*$/, '');
+    if (!clean) throw new BadRequestException('A domain name is required');
+    // Prevent two services from claiming the same host (Caddy would otherwise
+    // silently route only to whichever route it evaluated first).
+    const conflict = Array.from(this.services.values()).find(
+      (s) => s.id !== id && (s.domains || []).includes(clean),
+    );
+    if (conflict) {
+      throw new BadRequestException(
+        `Domain "${clean}" is already assigned to service "${conflict.name}". Remove it there first.`,
+      );
+    }
+    const list = service.domains || [];
+    if (!list.includes(clean)) list.push(clean);
+    service.domains = list;
+    service.domainStatus = service.domainStatus || {};
+    if (!service.domainStatus[clean]) {
+      service.domainStatus[clean] = {
+        status: 'pending',
+        targetIp: this.systemSettingsService.getServerIp(),
+        createdAt: new Date().toISOString(),
+      };
+    }
+    this.saveToDisk();
+    await this.syncCaddy().catch(() => {});
+    // Run an immediate DNS check so the domain can flip to verified right away.
+    await this.verifyDomains(service).catch(() => {});
+    this.saveToDisk();
+    return service;
+  }
+
+  /** Remove a domain from a service and re-sync the edge proxy. */
+  async removeDomain(id: string, domain: string): Promise<ServiceRecord> {
+    const service = await this.getService(id);
+    service.domains = (service.domains || []).filter((d) => d !== domain);
+    if (service.domainStatus) delete service.domainStatus[domain];
+    this.saveToDisk();
+    await this.syncCaddy().catch(() => {});
+    return service;
+  }
+
+  /** The IP custom domains should point at (configured or auto-detected). */
+  getServerIp(): string {
+    return this.systemSettingsService.getServerIp();
+  }
+
+  /** Verify a single service's domains against the server IP. */
+  async verifyServiceDomains(id: string): Promise<ServiceRecord> {
+    const service = await this.getService(id);
+    await this.verifyDomains(service);
+    this.saveToDisk();
+    return service;
+  }
+
+  /** Verify every domain across all services (edge auto-check). */
+  async verifyAllDomains(): Promise<{ verified: number; pending: number; checked: number }> {
+    let verified = 0;
+    let pending = 0;
+    for (const service of this.services.values()) {
+      await this.verifyDomains(service);
+      for (const host of service.domains || []) {
+        if (service.domainStatus?.[host]?.status === 'verified') verified++;
+        else pending++;
+      }
+    }
+    this.saveToDisk();
+    return { verified, pending, checked: verified + pending };
+  }
+
+  /**
+   * Check whether a single hostname currently resolves to this server's IP
+   * (used by onboarding / settings to validate a base or wildcard domain).
+   */
+  async checkHost(host: string): Promise<{ host: string; targetIp: string; ips: string[]; verified: boolean }> {
+    const clean = (host || '').trim().toLowerCase();
+    const targetIp = this.systemSettingsService.getServerIp();
+    const ips = clean ? await this.resolveDomainIps(clean) : [];
+    return { host: clean, targetIp, ips, verified: !!targetIp && ips.includes(targetIp) };
+  }
+
+  /** Verify the global dashboard (server) domain and persist its status. */
+  async verifyServerDomain(): Promise<{ host: string; targetIp: string; ips: string[]; verified: boolean }> {
+    const host = (this.systemSettingsService.getServerDomain() || '').trim().toLowerCase();
+    const targetIp = this.systemSettingsService.getServerIp();
+
+    if (!host) {
+      await this.systemSettingsService.updateSettings({
+        domains: {
+          domainStatus: undefined,
+          domainStatusCheckedAt: undefined,
+          domainStatusVerifiedAt: undefined,
+          domainStatusError: undefined,
+        },
+      });
+      return { host: '', targetIp, ips: [], verified: false };
+    }
+
+    const ips = await this.resolveDomainIps(host);
+    const verified = !!targetIp && ips.includes(targetIp);
+    await this.systemSettingsService.updateSettings({
+      domains: {
+        domainStatus: verified ? 'verified' : 'pending',
+        domainStatusCheckedAt: new Date().toISOString(),
+        domainStatusVerifiedAt: verified ? new Date().toISOString() : undefined,
+        domainStatusError: verified
+          ? undefined
+          : ips.length
+            ? `Currently points to ${ips.join(', ')}`
+            : 'No DNS records found yet',
+      },
+    });
+    return { host, targetIp, ips, verified };
+  }
+
+  /** Resolve the IPv4/IPv6 addresses (following a CNAME) for a hostname. */
+  private async resolveDomainIps(host: string): Promise<string[]> {
+    const ips: string[] = [];
+    try {
+      ips.push(...(await dns.promises.resolve4(host)));
+    } catch {}
+    if (ips.length === 0) {
+      try {
+        const cnames = await dns.promises.resolveCname(host);
+        for (const c of cnames) {
+          try {
+            ips.push(...(await dns.promises.resolve4(c)));
+          } catch {}
+        }
+      } catch {}
+    }
+    try {
+      ips.push(...(await dns.promises.resolve6(host)));
+    } catch {}
+    return Array.from(new Set(ips));
+  }
+
+  /** Update a service's per-domain verification status in place. */
+  private async verifyDomains(service: ServiceRecord): Promise<void> {
+    const targetIp = this.systemSettingsService.getServerIp();
+    service.domainStatus = service.domainStatus || {};
+    await Promise.all(
+      (service.domains || []).map(async (host) => {
+        const entry: DomainStatusRecord = service.domainStatus![host] || {
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+        };
+        entry.targetIp = targetIp;
+        entry.lastCheckedAt = new Date().toISOString();
+        const ips = await this.resolveDomainIps(host);
+        if (targetIp && ips.includes(targetIp)) {
+          entry.status = 'verified';
+          entry.verifiedAt = entry.verifiedAt || new Date().toISOString();
+          entry.lastError = undefined;
+        } else {
+          entry.status = 'pending';
+          entry.lastError =
+            ips.length === 0 ? 'No DNS records found yet' : `Currently points to ${ips.join(', ')}`;
+        }
+        service.domainStatus![host] = entry;
+      }),
+    );
+  }
+
+  /** All host→target routes derived from running services' assigned domains. */
+  getRoutes(): CaddyRoute[] {
+    const routes: CaddyRoute[] = [];
+    const seen = new Set<string>();
+    for (const svc of this.services.values()) {
+      if (!svc.domains || svc.domains.length === 0) continue;
+      if (svc.status !== 'running') continue;
+      const target = `${svc.containerName}:${svc.internalPort || 3000}`;
+      for (const host of svc.domains) {
+        if (seen.has(host)) continue;
+        seen.add(host);
+        routes.push({ host, target });
+      }
+    }
+    return routes;
+  }
+
+  /** Recompute and push all routes to Caddy (best-effort). */
+  async syncCaddy(): Promise<{ applied: boolean; error?: string }> {
+    return this.caddyService.applyRoutes(this.getRoutes());
   }
 
   async updateSettings(
     id: string,
     settings: {
       dockerfilePath?: string;
-      buildMethod?: 'auto' | 'railpack' | 'dockerfile';
+      buildMethod?: 'auto' | 'railpack' | 'dockerfile' | 'slim';
       runtimeMode?: 'web' | 'worker';
       subfolder?: string;
       port?: number;
       installCommand?: string;
       buildCommand?: string;
       startCommand?: string;
+      systemPackages?: string;
+      nodeVersion?: string;
     }
   ): Promise<ServiceRecord> {
     const service = await this.getService(id);
@@ -316,6 +743,8 @@ export class ServicesService implements OnModuleInit {
     if (settings.installCommand !== undefined) service.installCommand = settings.installCommand;
     if (settings.buildCommand !== undefined) service.buildCommand = settings.buildCommand;
     if (settings.startCommand !== undefined) service.startCommand = settings.startCommand;
+    if (settings.systemPackages !== undefined) service.systemPackages = settings.systemPackages || undefined;
+    if (settings.nodeVersion !== undefined) service.nodeVersion = settings.nodeVersion || undefined;
 
     if (settings.dockerfilePath !== undefined) {
       if (settings.dockerfilePath) {
@@ -331,6 +760,7 @@ export class ServicesService implements OnModuleInit {
         delete service.env['GIT_SUBFOLDER'];
       }
     }
+    this.saveToDisk();
     return service;
   }
 

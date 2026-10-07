@@ -10,12 +10,19 @@ interface TerminalDrawerProps {
   serviceId?: string;
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: 'build' | 'runtime';
 }
 
-export function TerminalDrawer({ serviceName, serviceId, isOpen, onClose }: TerminalDrawerProps) {
+export function TerminalDrawer({ serviceName, serviceId, isOpen, onClose, initialTab = 'runtime' }: TerminalDrawerProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermInstance = useRef<Terminal | null>(null);
-  const [activeTab, setActiveTab] = useState<'build' | 'runtime'>('runtime');
+  const [activeTab, setActiveTab] = useState<'build' | 'runtime'>(initialTab);
+
+  // Follow the caller's requested tab (e.g. opening a building service should
+  // land on Build Logs) without fighting the user's manual tab choices.
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab, serviceId]);
 
   useEffect(() => {
     if (!isOpen || !terminalRef.current) return;

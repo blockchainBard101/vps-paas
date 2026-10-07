@@ -237,13 +237,15 @@ export async function createDatabaseBackup(
 
 export interface ServiceSettingsUpdate {
   dockerfilePath?: string;
-  buildMethod?: 'auto' | 'railpack' | 'dockerfile';
+  buildMethod?: 'auto' | 'railpack' | 'dockerfile' | 'slim';
   runtimeMode?: 'web' | 'worker';
   subfolder?: string;
   port?: number;
   installCommand?: string;
   buildCommand?: string;
   startCommand?: string;
+  systemPackages?: string;
+  nodeVersion?: string;
   repoName?: string;
   branch?: string;
   cloneUrl?: string;
@@ -263,11 +265,25 @@ export interface ServiceRecord {
   gitBranch?: string;
   subfolder?: string;
   dockerfilePath?: string;
-  buildMethod?: 'auto' | 'railpack' | 'dockerfile';
+  buildMethod?: 'auto' | 'railpack' | 'dockerfile' | 'slim';
   runtimeMode?: 'web' | 'worker';
   installCommand?: string;
   buildCommand?: string;
   startCommand?: string;
+  systemPackages?: string;
+  nodeVersion?: string;
+  domains?: string[];
+  domainStatus?: Record<
+    string,
+    {
+      status: 'pending' | 'verified';
+      targetIp?: string;
+      verifiedAt?: string;
+      lastCheckedAt?: string;
+      lastError?: string;
+      createdAt: string;
+    }
+  >;
   env: Record<string, string>;
   createdAt: string;
   startedAt?: string;
@@ -503,6 +519,32 @@ export async function detectGitHubRepoBuild(
   }
 }
 
+export interface EnvSuggestion {
+  key: string;
+  client: boolean;
+  sources: string[];
+  sample?: string;
+}
+
+export async function fetchEnvSuggestions(
+  owner: string,
+  repo: string,
+  branch?: string,
+  subfolder?: string
+): Promise<EnvSuggestion[]> {
+  try {
+    const params = new URLSearchParams();
+    if (branch) params.set('branch', branch);
+    if (subfolder && subfolder !== '.') params.set('subfolder', subfolder);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`${API_BASE}/github/repos/${owner}/${repo}/env-suggestions${qs}`);
+    if (!res.ok) return [];
+    return res.json();
+  } catch {
+    return [];
+  }
+}
+
 export async function deployGitHubRepo(
   repoName: string,
   branch: string,
@@ -511,12 +553,14 @@ export async function deployGitHubRepo(
   env: Record<string, string> = {},
   subfolder?: string,
   dockerfilePath?: string,
-  buildMethod?: 'auto' | 'railpack' | 'dockerfile',
+  buildMethod?: 'auto' | 'railpack' | 'dockerfile' | 'slim',
   runtimeMode?: 'web' | 'worker',
   installCommand?: string,
   buildCommand?: string,
   startCommand?: string,
-  tempId?: string
+  tempId?: string,
+  systemPackages?: string,
+  nodeVersion?: string
 ): Promise<{ service: ServiceRecord; git: any }> {
   const res = await fetch(`${API_BASE}/github/deploy`, {
     method: 'POST',
@@ -535,6 +579,8 @@ export async function deployGitHubRepo(
       installCommand,
       buildCommand,
       startCommand,
+      systemPackages,
+      nodeVersion,
     }),
   });
   if (!res.ok) {
@@ -544,9 +590,15 @@ export async function deployGitHubRepo(
   return res.json();
 }
 
-export async function fetchBuildLogs(id: string): Promise<{ logs: string[]; status: string }> {
+export async function fetchBuildLogs(id: string): Promise<{ logs: string[]; status: string; phase?: string }> {
   const res = await fetch(`${API_BASE}/github/build-logs/${encodeURIComponent(id)}`);
   if (!res.ok) return { logs: [], status: 'not_found' };
+  return res.json();
+}
+
+export async function fetchBuildStatus(id: string): Promise<{ status: string; phase?: string }> {
+  const res = await fetch(`${API_BASE}/github/build-status/${encodeURIComponent(id)}`);
+  if (!res.ok) return { status: 'not_found' };
   return res.json();
 }
 
@@ -566,9 +618,106 @@ export async function updateServiceSettings(
   return res.json();
 }
 
+export async function addServiceDomain(id: string, domain: string): Promise<ServiceRecord> {
+  const res = await fetch(`${API_BASE}/services/${id}/domains`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ domain }),
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Failed to add domain: ${err}`);
+  }
+  return res.json();
+}
+
+export async function removeServiceDomain(id: string, domain: string): Promise<ServiceRecord> {
+  const res = await fetch(`${API_BASE}/services/${id}/domains`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ domain }),
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Failed to remove domain: ${err}`);
+  }
+  return res.json();
+}
+
+export async function verifyServiceDomains(id: string): Promise<ServiceRecord> {
+  const res = await fetch(`${API_BASE}/services/${id}/domains/verify`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to verify domains');
+  return res.json();
+}
+
+export async function verifyAllDomains(): Promise<{ verified: number; pending: number; checked: number }> {
+  const res = await fetch(`${API_BASE}/system/domains/verify-all`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to verify domains');
+  return res.json();
+}
+
+export async function verifyHost(
+  host: string
+): Promise<{ host: string; targetIp: string; ips: string[]; verified: boolean }> {
+  const res = await fetch(`${API_BASE}/system/domains/verify-host`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host }),
+  });
+  if (!res.ok) throw new Error('Failed to verify host');
+  return res.json();
+}
+
+export async function verifyBaseDomain(): Promise<{
+  host: string;
+  targetIp: string;
+  ips: string[];
+  verified: boolean;
+}> {
+  const res = await fetch(`${API_BASE}/system/domains/verify-base`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to verify domain');
+  return res.json();
+}
+
+export interface DomainStatus {
+  caddyAvailable: boolean;
+  caddyRunning: boolean;
+  caddyContainerId?: string;
+  adminUrl: string;
+  serverDomain: string;
+  wildcardDomain: string;
+  serverIp: string;
+  routes: Array<{ host: string; target: string }>;
+}
+
+export async function fetchDomainStatus(): Promise<DomainStatus> {
+  const res = await fetch(`${API_BASE}/system/domains/status`);
+  if (!res.ok) throw new Error('Failed to fetch domain status');
+  return res.json();
+}
+
+export async function syncDomains(): Promise<{ applied: boolean; error?: string; routes: Array<{ host: string; target: string }> }> {
+  const res = await fetch(`${API_BASE}/system/domains/sync`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to sync domains');
+  return res.json();
+}
+
+export async function startCaddy(): Promise<{ running: boolean; started: boolean; ready: boolean; applied: boolean; error?: string }> {
+  const res = await fetch(`${API_BASE}/system/caddy/start`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to start Caddy');
+  return res.json();
+}
+
+export async function stopCaddy(): Promise<{ stopped: boolean; error?: string }> {
+  const res = await fetch(`${API_BASE}/system/caddy/stop`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to stop Caddy');
+  return res.json();
+}
+
 export async function fetchDeployHistory(serviceId: string): Promise<Array<{
   id: string;
   status: 'building' | 'success' | 'failed';
+  phase?: string;
   createdAt: string;
   branch: string;
   repoName: string;
@@ -672,8 +821,7 @@ export interface SystemSettingsPayload {
   domains: {
     serverDomain: string;
     wildcardDomain: string;
-    sslProvider: 'letsencrypt' | 'zerossl' | 'selfsigned';
-    acmeEmail: string;
+    serverIp: string;
     proxyType: 'caddy' | 'traefik' | 'nginx';
     customDomains: Array<{
       domain: string;
@@ -681,6 +829,10 @@ export interface SystemSettingsPayload {
       status: 'active' | 'pending' | 'error';
       sslValidUntil: string;
     }>;
+    domainStatus?: 'pending' | 'verified';
+    domainStatusCheckedAt?: string;
+    domainStatusVerifiedAt?: string;
+    domainStatusError?: string;
   };
   dns: {
     provider: 'cloudflare' | 'route53' | 'digitalocean' | 'manual';

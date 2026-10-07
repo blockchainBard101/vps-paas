@@ -14,6 +14,7 @@ import { SystemSettingsService } from './system-settings.service.js';
 import { SystemSettingsController } from './system-settings.controller.js';
 import { AuthService } from './auth.service.js';
 import { AuthController } from './auth.controller.js';
+import { CaddyService } from './caddy.service.js';
 
 @Module({
   imports: [],
@@ -35,6 +36,7 @@ import { AuthController } from './auth.controller.js';
     GitHubService,
     ProjectsService,
     SystemSettingsService,
+    CaddyService,
   ],
 })
 export class AppModule {}
