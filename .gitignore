@@ -1,1 +1,23 @@
+# Dependencies
 node_modules
+
+# Build output
+dist
+build
+*.tsbuildinfo
+
+# Runtime data (builds, deployment logs, backups, JSON stores).
+# By default these live outside the repo in $DATA_DIR / ~/.railway-neon-paas,
+# but ignore any that still land in the tree.
+data/
+backups/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# OS / editor
+.DS_Store
+*.log
+

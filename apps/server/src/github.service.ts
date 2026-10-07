@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { ServicesService, ServiceRecord } from './services.service.js';
 import { SystemSettingsService } from './system-settings.service.js';
+import { ensureDataDir, getBuildsDir, getDeploymentsDir } from './config/paths.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -116,7 +117,7 @@ export class GitHubService implements OnModuleInit {
 
     // Save build log to disk for persistent deployment history
     try {
-      const logsDir = path.join(process.cwd(), 'data', 'deployments');
+      const logsDir = getDeploymentsDir();
       if (!fs.existsSync(logsDir)) {
         fs.mkdirSync(logsDir, { recursive: true });
       }
@@ -152,7 +153,7 @@ export class GitHubService implements OnModuleInit {
       attachToSession(existing);
     } else {
       // Check disk logs for completed past deployments
-      const logFile = path.join(process.cwd(), 'data', 'deployments', `${id}.log`);
+      const logFile = path.join(getDeploymentsDir(), `${id}.log`);
       if (fs.existsSync(logFile)) {
         try {
           const content = fs.readFileSync(logFile, 'utf8');
@@ -201,7 +202,7 @@ export class GitHubService implements OnModuleInit {
     if (session) {
       return { logs: session.logs, status: session.status };
     }
-    const logFile = path.join(process.cwd(), 'data', 'deployments', `${id}.log`);
+    const logFile = path.join(getDeploymentsDir(), `${id}.log`);
     if (fs.existsSync(logFile)) {
       try {
         const content = fs.readFileSync(logFile, 'utf8');
@@ -260,14 +261,7 @@ export class GitHubService implements OnModuleInit {
     private readonly servicesService: ServicesService,
     private readonly systemSettingsService: SystemSettingsService,
   ) {
-    const baseDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-    if (!fs.existsSync(baseDir)) {
-      try {
-        fs.mkdirSync(baseDir, { recursive: true });
-      } catch (err) {
-        console.warn('[GitHubService] Could not create data dir:', err);
-      }
-    }
+    const baseDir = ensureDataDir();
     this.storagePath = path.join(baseDir, 'github-config.json');
     this.loadConfig();
   }
@@ -1141,7 +1135,7 @@ export class GitHubService implements OnModuleInit {
     const safeName = options.repoName.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
     const buildId = crypto.randomBytes(4).toString('hex');
     const imageTag = `paas-app-${safeName}:${buildId}`;
-    const buildsBaseDir = path.join(process.cwd(), 'data', 'builds');
+    const buildsBaseDir = getBuildsDir();
     const buildDir = path.join(buildsBaseDir, `${safeName}-${buildId}`);
 
     const cleanSubfolder = (options.subfolder || '').trim().replace(/^\/+|\/+$/g, '');
@@ -1268,7 +1262,10 @@ export class GitHubService implements OnModuleInit {
       log(`[${new Date().toISOString()}] ✨ Image compilation successful (${imageTag}). Launching service container...\n`);
 
       // 4. Deploy service container using the newly built image
+      // When redeploying an existing service we reuse its id so the canvas node,
+      // open drawer and live log streams keep pointing at the same service entity.
       const service = await this.servicesService.deployService({
+        id: options.serviceId,
         name: subName,
         image: imageTag,
         port: options.port || 3000,
@@ -1369,7 +1366,11 @@ export class GitHubService implements OnModuleInit {
 
     console.log(`[BuildEngine] Redeploying service ${repoName} (${serviceId}) with dockerfilePath: ${dockerfilePath || 'auto'}...`);
 
-    // Deploy new container
+    // Build the new image and deploy in place. `deployFromGitHub` reuses the
+    // provided serviceId, and `deployService` atomically stops & removes the
+    // previous container sharing the same name before starting the new one.
+    // This keeps zero downtime during the build and avoids destroying the
+    // service record (and its live log stream) on failure.
     const result = await this.deployFromGitHub({
       serviceId,
       tempId: serviceId,
@@ -1386,15 +1387,6 @@ export class GitHubService implements OnModuleInit {
       port,
       env: existing?.env || {},
     });
-
-    // Remove old container if it exists
-    if (existing?.containerId) {
-      try {
-        await this.servicesService.deleteService(serviceId);
-      } catch (e: any) {
-        console.warn(`[BuildEngine] Notice removing previous container for ${serviceId}: ${e.message}`);
-      }
-    }
 
     return result;
   }

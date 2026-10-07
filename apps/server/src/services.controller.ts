@@ -90,21 +90,39 @@ export class ServicesController {
   @Get(':id/logs/stream')
   async streamLogs(@Param('id') id: string, @Res() res: Response) {
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
+    // Disable proxy buffering so runtime log lines stream instantly.
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
+    (res as any).socket?.setNoDelay?.(true);
+
+    // Immediate handshake so the client's EventSource flips to "connected" instantly.
+    res.write(': connected\n\n');
+    (res as any).flush?.();
+
+    // Heartbeat comment every 15s keeps intermediaries from closing idle streams.
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': ping\n\n');
+        (res as any).flush?.();
+      } catch {}
+    }, 15000);
 
     const cleanup = await this.servicesService.streamLogs(
       id,
       (chunk) => {
         res.write(`data: ${JSON.stringify({ log: chunk })}\n\n`);
+        (res as any).flush?.();
       },
       () => {
+        clearInterval(heartbeat);
         res.end();
       },
     );
 
     res.on('close', () => {
+      clearInterval(heartbeat);
       cleanup();
     });
   }

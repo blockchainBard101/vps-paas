@@ -1,4 +1,5 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { ensureDataDir } from './config/paths.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,14 +29,7 @@ export class ProjectsService {
   private storagePath: string;
 
   constructor() {
-    const baseDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-    if (!fs.existsSync(baseDir)) {
-      try {
-        fs.mkdirSync(baseDir, { recursive: true });
-      } catch (err) {
-        console.warn('[ProjectsService] Could not create data dir:', err);
-      }
-    }
+    const baseDir = ensureDataDir();
     this.storagePath = path.join(baseDir, 'projects.json');
     this.loadFromDisk();
   }

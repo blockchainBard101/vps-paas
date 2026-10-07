@@ -1,5 +1,6 @@
 import { Injectable, BadRequestException, OnModuleInit } from '@nestjs/common';
 import { DockerService } from './docker.service.js';
+import { getBackupsDir } from './config/paths.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -648,7 +649,7 @@ export class DatabaseService implements OnModuleInit {
       byteSize = Math.floor(Math.random() * 5000000 + 12000000);
     }
 
-    const backupDir = path.join(process.cwd(), 'backups', serviceId);
+    const backupDir = path.join(getBackupsDir(), serviceId);
     fs.mkdirSync(backupDir, { recursive: true });
     const fullPath = path.join(backupDir, filename);
     fs.writeFileSync(fullPath, Buffer.alloc(Math.min(byteSize, 4096)));

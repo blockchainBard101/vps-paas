@@ -32,6 +32,7 @@ import {
 } from 'lucide-react';
 import {
   fetchServiceLogs,
+  fetchDeployHistory,
   updateServiceEnv,
   restartService,
   deleteService,
@@ -154,7 +155,18 @@ export function ServiceDetailDrawer({
   const [logs, setLogs] = useState<string>('');
   const [streamStatus, setStreamStatus] = useState<'connecting' | 'connected' | 'completed' | 'error'>('connecting');
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
+  const autoScrollRef = useRef<boolean>(true);
   const logsBottomRef = useRef<HTMLDivElement>(null);
+
+  // Keep a ref in sync so toggling auto-scroll never re-subscribes the stream.
+  useEffect(() => {
+    autoScrollRef.current = autoScroll;
+  }, [autoScroll]);
+
+  // Persisted deployment history (past & in-flight builds)
+  const [deployHistory, setDeployHistory] = useState<
+    Array<{ id: string; status: 'building' | 'success' | 'failed'; createdAt: string; branch: string; repoName: string; logsCount: number }>
+  >([]);
 
   // Synchronize subtab state when building status changes
   useEffect(() => {
@@ -229,13 +241,13 @@ export function ServiceDetailDrawer({
         const parsed = JSON.parse(e.data);
         if (parsed.log) {
           setLogs((prev) => prev + parsed.log);
-          if (autoScroll) {
+          if (autoScrollRef.current) {
             logsBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
           }
         }
       } catch {
         setLogs((prev) => prev + e.data + '\n');
-        if (autoScroll) {
+        if (autoScrollRef.current) {
           logsBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
         }
       }
@@ -260,7 +272,34 @@ export function ServiceDetailDrawer({
     return () => {
       es.close();
     };
-  }, [isOpen, activeTab, logSubTab, service.id, autoScroll]);
+  }, [isOpen, activeTab, logSubTab, service.id]);
+
+  // Fetch deployment history when the drawer is open (and refresh it while a
+  // build is running so the timeline reflects live status transitions).
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const history = await fetchDeployHistory(service.id);
+        if (!cancelled) setDeployHistory(history);
+      } catch {
+        // Backend temporarily unavailable
+      }
+    };
+
+    load();
+    const interval = setInterval(() => {
+      const hasBuilding = deployHistory.some((h) => h.status === 'building');
+      if (activeTab === 'deployments' || hasBuilding) load();
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isOpen, service.id, activeTab, deployHistory.length]);
 
   function handleDownloadLogs() {
     const blob = new Blob([logs], { type: 'text/plain;charset=utf-8' });
@@ -340,6 +379,10 @@ export function ServiceDetailDrawer({
   async function handleRedeployService() {
     setIsRedeploying(true);
     setSaveEnvNotice(null);
+    // Jump straight to the live Build Logs view so compilation streams in real time
+    // while the (long-running) rebuild request is still in flight on the server.
+    setActiveTab('logs');
+    setLogSubTab('build');
     try {
       const gitUrl = service.gitRepo || service.env?.GIT_REPO;
       const isGitHub = Boolean(gitUrl);
@@ -363,17 +406,13 @@ export function ServiceDetailDrawer({
           buildCommand,
           startCommand,
         });
-        setSaveEnvNotice('Redeployment triggered! Rebuilding OCI image...');
+        setSaveEnvNotice('Redeployment complete! Container is live.');
         onServiceUpdated?.(result.service);
       } else {
         // Regular non-Git container: Restart container
         await restartService(service.id);
         setSaveEnvNotice('Container restarted successfully');
       }
-
-      // Automatically switch to live Build Logs view
-      setActiveTab('logs');
-      setLogSubTab('build');
     } catch (err: any) {
       alert(`Redeploy error: ${err.message}`);
     } finally {
@@ -613,39 +652,84 @@ export function ServiceDetailDrawer({
                 Deployment History
               </h4>
               <div className="space-y-2">
-                <div className="p-3.5 rounded-xl border border-zinc-800 bg-zinc-900/40 flex items-center justify-between text-xs font-mono">
-                  <div className="flex items-center gap-3">
-                    <span className={`w-2 h-2 rounded-full ${
-                      isFailed ? 'bg-red-400' : isBuilding ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
-                    }`} />
-                    <div>
-                      <div className="font-semibold text-zinc-200">
-                        {service.gitRepo ? service.gitRepo.split('/').pop()?.replace(/\.git$/, '') : service.name} ({service.gitBranch || service.branch || 'main'})
-                      </div>
-                      <div className="text-[11px] text-zinc-500 font-sans mt-0.5">
-                        {isRedeploying
-                          ? 'Triggered via manual Redeploy button'
-                          : isFailed
-                          ? 'Compilation or process launch failed'
-                          : 'Active production container image'}
+                {deployHistory.length === 0 ? (
+                  <div className="p-3.5 rounded-xl border border-zinc-800 bg-zinc-900/40 flex items-center justify-between text-xs font-mono">
+                    <div className="flex items-center gap-3">
+                      <span className={`w-2 h-2 rounded-full ${
+                        isFailed ? 'bg-red-400' : isBuilding ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
+                      }`} />
+                      <div>
+                        <div className="font-semibold text-zinc-200">
+                          {service.gitRepo ? service.gitRepo.split('/').pop()?.replace(/\.git$/, '') : service.name} ({service.gitBranch || service.branch || 'main'})
+                        </div>
+                        <div className="text-[11px] text-zinc-500 font-sans mt-0.5">
+                          {isRedeploying
+                            ? 'Triggered via manual Redeploy button'
+                            : isFailed
+                            ? 'Compilation or process launch failed'
+                            : 'Active production container image'}
+                        </div>
                       </div>
                     </div>
+                    <div className="text-right">
+                      <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${
+                        isFailed
+                          ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+                          : isBuilding
+                          ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                          : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                      }`}>
+                        {isFailed ? 'Failed' : isBuilding ? 'Building' : 'Success'}
+                      </span>
+                      <span className="block text-[10px] text-zinc-500 mt-1 font-sans">
+                        {service.createdAt ? timeAgo(service.createdAt) : 'Just now'}
+                      </span>
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${
-                      isFailed
-                        ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                        : isBuilding
-                        ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                        : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                    }`}>
-                      {isFailed ? 'Failed' : isBuilding ? 'Building' : 'Success'}
-                    </span>
-                    <span className="block text-[10px] text-zinc-500 mt-1 font-sans">
-                      {service.createdAt ? timeAgo(service.createdAt) : 'Just now'}
-                    </span>
-                  </div>
-                </div>
+                ) : (
+                  deployHistory.map((entry, idx) => {
+                    const entryFailed = entry.status === 'failed';
+                    const entryBuilding = entry.status === 'building';
+                    return (
+                      <div
+                        key={`${entry.id}-${idx}`}
+                        className="p-3.5 rounded-xl border border-zinc-800 bg-zinc-900/40 flex items-center justify-between text-xs font-mono"
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className={`w-2 h-2 rounded-full ${
+                            entryFailed ? 'bg-red-400' : entryBuilding ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
+                          }`} />
+                          <div>
+                            <div className="font-semibold text-zinc-200">
+                              {entry.repoName} ({entry.branch})
+                            </div>
+                            <div className="text-[11px] text-zinc-500 font-sans mt-0.5">
+                              {entryBuilding
+                                ? 'Build in progress — streaming logs…'
+                                : entryFailed
+                                ? 'Compilation or process launch failed'
+                                : `Deployed successfully • ${entry.logsCount} log events`}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${
+                            entryFailed
+                              ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+                              : entryBuilding
+                              ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                              : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                          }`}>
+                            {entryBuilding ? 'Building' : entryFailed ? 'Failed' : 'Success'}
+                          </span>
+                          <span className="block text-[10px] text-zinc-500 mt-1 font-sans">
+                            {entry.createdAt ? timeAgo(entry.createdAt) : 'Just now'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </div>
           </div>
@@ -1235,6 +1319,9 @@ export function ServiceDetailDrawer({
                     onClick={async () => {
                       setIsRedeploying(true);
                       setSettingsNotice(null);
+                      // Stream live build logs immediately while the rebuild runs.
+                      setActiveTab('logs');
+                      setLogSubTab('build');
                       try {
                         const res = await redeployGitHubService(service.id, {
                           dockerfilePath: dockerfilePath.trim() || undefined,
