@@ -1970,8 +1970,27 @@ export class GitHubService implements OnModuleInit {
         hasCacheImage = false;
       }
 
+      const pkg = this.readPackageJson(appDir);
+      const hasPrisma = !!(
+        pkg?.dependencies?.prisma ||
+        pkg?.devDependencies?.prisma ||
+        pkg?.dependencies?.['@prisma/client'] ||
+        pkg?.devDependencies?.['@prisma/client'] ||
+        fs.existsSync(path.join(appDir, 'prisma', 'schema.prisma')) ||
+        fs.existsSync(path.join(appDir, 'schema.prisma'))
+      );
+
+      const mergedEnv: Record<string, string> = { ...(options.env || {}) };
+      if (hasPrisma || !options.nodeVersion || options.nodeVersion === '22' || options.nodeVersion === '20') {
+        if (!mergedEnv.NODE_OPTIONS) {
+          mergedEnv.NODE_OPTIONS = '--experimental-require-module';
+        } else if (!mergedEnv.NODE_OPTIONS.includes('--experimental-require-module')) {
+          mergedEnv.NODE_OPTIONS = `${mergedEnv.NODE_OPTIONS} --experimental-require-module`;
+        }
+      }
+
       // ── "Fast" preset: generate a slim Dockerfile (opt-in) ──────────────────
-      const publicBuildEnv = this.getPublicBuildEnv(options.env);
+      const publicBuildEnv = this.getPublicBuildEnv(mergedEnv);
       const slimDockerfile =
         options.buildMethod === 'slim'
           ? this.generateSlimDockerfile(appDir, { ...options, staticSite, buildEnv: publicBuildEnv })
@@ -2045,15 +2064,6 @@ export class GitHubService implements OnModuleInit {
         if (hasCacheImage) {
           nixArgs.push('--cache-from', cacheTag);
         }
-        const pkg = this.readPackageJson(appDir);
-        const hasPrisma = !!(
-          pkg?.dependencies?.prisma ||
-          pkg?.devDependencies?.prisma ||
-          pkg?.dependencies?.['@prisma/client'] ||
-          pkg?.devDependencies?.['@prisma/client'] ||
-          fs.existsSync(path.join(appDir, 'prisma', 'schema.prisma')) ||
-          fs.existsSync(path.join(appDir, 'schema.prisma'))
-        );
         // Default to modern Node 22 (LTS) so modern frameworks and packages (e.g. Prisma 7+,
         // Next.js 16+, NestJS) which require Node >=20.19 or >=22 build smoothly.
         let nodeVersion = options.nodeVersion || this.getRepoNodeVersion(appDir) || '22';
@@ -2070,7 +2080,7 @@ export class GitHubService implements OnModuleInit {
           // Nixpacks packages Node 22 as 22.11.0, which causes the preinstall gatekeeper to abort.
           // Passing --ignore-scripts skips this artificial blocker, and we then explicitly generate Prisma Client.
           defaultInstallCmd =
-            'npm install --legacy-peer-deps --ignore-scripts && (npm rebuild || true) && (npx prisma generate || ./node_modules/.bin/prisma generate || true)';
+            'npm install --legacy-peer-deps --ignore-scripts && (npm rebuild || true) && (NODE_OPTIONS="--experimental-require-module" npx prisma generate || ./node_modules/.bin/prisma generate || true)';
         }
 
         let installCmd = options.installCommand?.trim();
@@ -2084,9 +2094,17 @@ export class GitHubService implements OnModuleInit {
           installCmd = defaultInstallCmd;
         }
         nixArgs.push('--install-cmd', installCmd);
-        if (options.buildCommand) {
-          nixArgs.push('--build-cmd', options.buildCommand);
+
+        // In Node 22.11.0 (packaged by Nixpacks LTS Nixpkgs snapshot), synchronous require()
+        // of ES Modules (used by Prisma 7 state.cjs requiring zeptomatch) requires
+        // --experimental-require-module to avoid ERR_REQUIRE_ESM.
+        const effectiveBuild =
+          options.buildCommand ||
+          (hasPrisma ? 'NODE_OPTIONS="--experimental-require-module" npm run build' : undefined);
+        if (effectiveBuild) {
+          nixArgs.push('--build-cmd', effectiveBuild);
         }
+
         let effectiveStart = options.startCommand;
         if (!effectiveStart) {
           if (staticSite) {
@@ -2094,7 +2112,6 @@ export class GitHubService implements OnModuleInit {
             effectiveStart = 'node /app/paas-static-server.js';
           } else {
             // Prefer an explicit production start (e.g. NestJS `start:prod`).
-            const pkg = this.readPackageJson(appDir);
             if (pkg?.scripts?.['start:prod']) {
               effectiveStart = 'npm run start:prod';
             }
@@ -2103,10 +2120,9 @@ export class GitHubService implements OnModuleInit {
         if (effectiveStart) {
           nixArgs.push('--start-cmd', effectiveStart);
         }
-        if (options.env) {
-          for (const [k, v] of Object.entries(options.env)) {
-            nixArgs.push('--env', `${k}=${v}`);
-          }
+
+        for (const [k, v] of Object.entries(mergedEnv)) {
+          nixArgs.push('--env', `${k}=${v}`);
         }
         await this.runProcess('nixpacks', nixArgs, {
           cwd: appDir,
@@ -2143,7 +2159,7 @@ export class GitHubService implements OnModuleInit {
         startCommand: options.startCommand,
         systemPackages: options.systemPackages,
         nodeVersion: options.nodeVersion,
-        env: options.env || {},
+        env: mergedEnv,
       });
 
       session.ids.add(service.id);
