@@ -1661,8 +1661,8 @@ export class GitHubService implements OnModuleInit {
   ): string | null {
     const port = options.port || 3000;
 
-    // Node major version for the slim base image (repo pin → setting → default 20).
-    const nodeMajor = (options.nodeVersion || this.getRepoNodeVersion(appDir) || '20').split('.')[0];
+    // Node major version for the slim base image (repo pin → setting → default 22).
+    const nodeMajor = (options.nodeVersion || this.getRepoNodeVersion(appDir) || '22').split('.')[0];
 
     // Optional OS packages, e.g. "libpq-dev imagemagick". Sanitised to safe tokens
     // (must start alphanumeric) so no leading-dash option/flag can be injected.
@@ -2045,9 +2045,15 @@ export class GitHubService implements OnModuleInit {
         if (hasCacheImage) {
           nixArgs.push('--cache-from', cacheTag);
         }
-        // Default to a modern Node when the repo doesn't pin its own version, so
-        // frameworks like Next.js 16 (which require Node >=20.9) build successfully.
-        const nodeVersion = options.nodeVersion || this.getRepoNodeVersion(appDir) || '20';
+        // Default to modern Node 22 (LTS) so modern frameworks and packages (e.g. Prisma 7+,
+        // Next.js 16+, NestJS) which require Node >=20.19 or >=22 build smoothly.
+        let nodeVersion = options.nodeVersion || this.getRepoNodeVersion(appDir) || '22';
+        if (nodeVersion === '20' || nodeVersion === '20.18') {
+          const pkg = this.readPackageJson(appDir);
+          if (pkg?.dependencies?.prisma || pkg?.devDependencies?.prisma || pkg?.dependencies?.['@prisma/client']) {
+            nodeVersion = '22';
+          }
+        }
         nixArgs.push('--env', `NIXPACKS_NODE_VERSION=${nodeVersion}`);
         nixArgs.push('--install-cmd', options.installCommand || 'npm install --legacy-peer-deps || npm ci');
         if (options.buildCommand) {

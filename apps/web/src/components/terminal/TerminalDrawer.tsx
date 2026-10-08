@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal as TerminalIcon, Minimize2, Trash2 } from 'lucide-react';
-import { getApiBase } from '@/lib/api';
+import { getApiBase, fetchBuildLogs } from '@/lib/api';
 
 interface TerminalDrawerProps {
   serviceName: string;
@@ -68,6 +68,16 @@ export function TerminalDrawer({ serviceName, serviceId, isOpen, onClose, initia
         ? `${apiBase}/github/build-logs/stream/${encodeURIComponent(serviceId)}`
         : `${apiBase}/services/${encodeURIComponent(serviceId)}/logs/stream`;
 
+      if (activeTab === 'build') {
+        fetchBuildLogs(serviceId)
+          .then((data) => {
+            if (data.logs && data.logs.length > 0) {
+              term.write(data.logs.join('').replace(/\r?\n/g, '\r\n'));
+            }
+          })
+          .catch(() => {});
+      }
+
       eventSource = new EventSource(streamUrl);
       
       eventSource.onmessage = (event) => {
@@ -82,6 +92,18 @@ export function TerminalDrawer({ serviceName, serviceId, isOpen, onClose, initia
       };
 
       eventSource.onerror = () => {
+        if (activeTab === 'build') {
+          fetchBuildLogs(serviceId)
+            .then((data) => {
+              if (data.logs && data.logs.length > 0) {
+                term.clear();
+                term.write(`\x1b[36m[PaaS Live Stream]\x1b[0m Historical \x1b[1mBuild Logs\x1b[0m for \x1b[1m${serviceName}\x1b[0m\r\n`);
+                term.write(`\x1b[90m------------------------------------------------------------\x1b[0m\r\n`);
+                term.write(data.logs.join('').replace(/\r?\n/g, '\r\n'));
+              }
+            })
+            .catch(() => {});
+        }
         term.write(`\r\n\x1b[33m[Stream]\x1b[0m ${activeTab === 'build' ? 'Build log stream ended or disconnected.' : 'Runtime log stream disconnected.'}\r\n`);
         eventSource?.close();
       };

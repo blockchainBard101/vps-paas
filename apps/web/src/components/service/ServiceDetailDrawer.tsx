@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import {
   fetchServiceLogs,
+  fetchBuildLogs,
   fetchDeployHistory,
   updateServiceEnv,
   restartService,
@@ -384,6 +385,18 @@ export function ServiceDetailDrawer({
       ? `${apiBase}/github/build-logs/stream/${encodeURIComponent(service.id)}`
       : `${apiBase}/services/${encodeURIComponent(service.id)}/logs/stream`;
 
+    let receivedChunks = false;
+    if (logSubTab === 'build') {
+      fetchBuildLogs(service.id)
+        .then((data) => {
+          if (data.logs && data.logs.length > 0) {
+            receivedChunks = true;
+            setLogs(data.logs.join(''));
+          }
+        })
+        .catch(() => {});
+    }
+
     const es = new EventSource(streamUrl);
 
     es.onopen = () => {
@@ -394,12 +407,14 @@ export function ServiceDetailDrawer({
       try {
         const parsed = JSON.parse(e.data);
         if (parsed.log) {
+          receivedChunks = true;
           setLogs((prev) => prev + parsed.log);
           if (autoScrollRef.current) {
             logsBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
           }
         }
       } catch {
+        receivedChunks = true;
         setLogs((prev) => prev + e.data + '\n');
         if (autoScrollRef.current) {
           logsBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -417,7 +432,19 @@ export function ServiceDetailDrawer({
           })
           .catch(() => {});
       } else {
-        setLogs((prev) => prev + '\n[PaaS LogStream] Build log stream ended.\n');
+        fetchBuildLogs(service.id)
+          .then((data) => {
+            if (data.logs && data.logs.length > 0) {
+              setLogs(data.logs.join(''));
+            } else if (!receivedChunks) {
+              setLogs((prev) => prev + '\n[PaaS LogStream] Build log stream ended.\n');
+            }
+          })
+          .catch(() => {
+            if (!receivedChunks) {
+              setLogs((prev) => prev + '\n[PaaS LogStream] Build log stream ended.\n');
+            }
+          });
       }
       setStreamStatus('completed');
       es.close();
