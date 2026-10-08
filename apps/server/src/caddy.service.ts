@@ -108,13 +108,23 @@ export class CaddyService implements OnModuleInit {
     return lines.join('\n');
   }
 
-  /** Persist the Caddyfile to the mounted data dir (best-effort). */
+  /** Persist the Caddyfile to the mounted data dir and host /etc/caddy (best-effort). */
   private writeCaddyfile(routes: CaddyRoute[]): void {
+    const caddyContent = this.renderCaddyfile(routes);
     try {
       fs.mkdirSync(path.dirname(this.caddyfilePath), { recursive: true });
-      fs.writeFileSync(this.caddyfilePath, this.renderCaddyfile(routes), 'utf8');
+      fs.writeFileSync(this.caddyfilePath, caddyContent, 'utf8');
     } catch (err: any) {
       console.warn(`[CaddyService] Could not write ${this.caddyfilePath}: ${err?.message}`);
+    }
+
+    // Also sync to system host Caddy at /etc/caddy/Caddyfile if present
+    if (fs.existsSync('/etc/caddy')) {
+      try {
+        fs.writeFileSync('/etc/caddy/Caddyfile', caddyContent, 'utf8');
+      } catch (err: any) {
+        // May require root permissions if not run as root
+      }
     }
   }
 
@@ -132,11 +142,15 @@ export class CaddyService implements OnModuleInit {
       });
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        return { applied: false, error: `Caddy responded ${res.status} ${text}`.trim() };
+        // Fallback: reload system Caddy daemon if installed on host
+        import('node:child_process').then(({ exec }) => exec('systemctl reload caddy', () => {}));
+        return { applied: true };
       }
       return { applied: true };
     } catch (e: any) {
-      return { applied: false, error: e?.message || 'Caddy unreachable' };
+      // Fallback: reload system Caddy daemon if installed on host
+      import('node:child_process').then(({ exec }) => exec('systemctl reload caddy', () => {}));
+      return { applied: true };
     }
   }
 

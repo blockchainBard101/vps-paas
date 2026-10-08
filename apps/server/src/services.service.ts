@@ -778,10 +778,19 @@ export class ServicesService implements OnModuleInit {
     );
   }
 
-  /** All host→target routes derived from running services' assigned domains. */
+  /** All host→target routes derived from dashboard domain and running services' assigned domains. */
   getRoutes(): CaddyRoute[] {
     const routes: CaddyRoute[] = [];
     const seen = new Set<string>();
+
+    // 1. Route the control plane dashboard domain if configured
+    const serverDomain = this.systemSettingsService.getServerDomain()?.trim();
+    if (serverDomain && !seen.has(serverDomain)) {
+      seen.add(serverDomain);
+      routes.push({ host: serverDomain, target: 'localhost:3000' });
+    }
+
+    // 2. Route all running services' assigned domains
     for (const svc of this.services.values()) {
       if (!svc.domains || svc.domains.length === 0) continue;
       if (svc.status !== 'running') continue;
