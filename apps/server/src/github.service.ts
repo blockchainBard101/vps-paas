@@ -1980,6 +1980,19 @@ export class GitHubService implements OnModuleInit {
         fs.existsSync(path.join(appDir, 'schema.prisma'))
       );
 
+      // If package.json build script has "prisma db push" or "prisma migrate deploy",
+      // defer it to runtime container startup (since live DB is not connected during Docker image compilation).
+      if (pkg?.scripts?.build && /\b(npx\s+)?prisma\s+(db\s+push|migrate\s+deploy)\b/.test(pkg.scripts.build)) {
+        log(`[${new Date().toISOString()}] ℹ️ Deferring "prisma db push/migrate" from build step to container startup...\n`);
+        pkg.scripts.build = pkg.scripts.build.replace(
+          /\b(npx\s+)?prisma\s+(db\s+push|migrate\s+deploy)\b/g,
+          'true /* deferred to container startup */',
+        );
+        try {
+          fs.writeFileSync(path.join(appDir, 'package.json'), JSON.stringify(pkg, null, 2), 'utf8');
+        } catch {}
+      }
+
       const mergedEnv: Record<string, string> = { ...(options.env || {}) };
       if (hasPrisma || !options.nodeVersion || options.nodeVersion === '22' || options.nodeVersion === '20') {
         if (!mergedEnv.NODE_OPTIONS) {
@@ -1987,6 +2000,10 @@ export class GitHubService implements OnModuleInit {
         } else if (!mergedEnv.NODE_OPTIONS.includes('--experimental-require-module')) {
           mergedEnv.NODE_OPTIONS = `${mergedEnv.NODE_OPTIONS} --experimental-require-module`;
         }
+      }
+      if (hasPrisma && !mergedEnv.DATABASE_URL) {
+        // Safe build-time dummy so Prisma schema/client validation passes if referenced during build
+        mergedEnv.DATABASE_URL = 'postgresql://postgres:postgres@127.0.0.1:5432/postgres';
       }
 
       // ── "Fast" preset: generate a slim Dockerfile (opt-in) ──────────────────
@@ -2098,9 +2115,16 @@ export class GitHubService implements OnModuleInit {
         // In Node 22.11.0 (packaged by Nixpacks LTS Nixpkgs snapshot), synchronous require()
         // of ES Modules (used by Prisma 7 state.cjs requiring zeptomatch) requires
         // --experimental-require-module to avoid ERR_REQUIRE_ESM.
-        const effectiveBuild =
-          options.buildCommand ||
-          (hasPrisma ? 'NODE_OPTIONS="--experimental-require-module" npm run build' : undefined);
+        let effectiveBuild = options.buildCommand;
+        if (effectiveBuild && /\b(npx\s+)?prisma\s+(db\s+push|migrate\s+deploy)\b/.test(effectiveBuild)) {
+          effectiveBuild = effectiveBuild.replace(
+            /\b(npx\s+)?prisma\s+(db\s+push|migrate\s+deploy)\b/g,
+            'true /* deferred to container startup */',
+          );
+        }
+        if (!effectiveBuild && hasPrisma) {
+          effectiveBuild = 'NODE_OPTIONS="--experimental-require-module" npm run build';
+        }
         if (effectiveBuild) {
           nixArgs.push('--build-cmd', effectiveBuild);
         }
