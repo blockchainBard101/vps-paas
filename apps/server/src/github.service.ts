@@ -2281,6 +2281,14 @@ export class GitHubService implements OnModuleInit {
         logsCount: session.logs.length,
         errorMessage: cleanMsg,
       });
+
+      // Update service record in ServicesService so canvas and drawer show "failed"
+      const targetServiceId =
+        options.serviceId && !options.serviceId.startsWith('deploying-') ? options.serviceId : undefined;
+      if (targetServiceId) {
+        this.servicesService.markServiceFailed(targetServiceId, cleanMsg);
+      }
+
       throw new BadRequestException(`Deployment failed: ${cleanMsg}`);
     } finally {
       // 5. Clean up temporary checkout workspace

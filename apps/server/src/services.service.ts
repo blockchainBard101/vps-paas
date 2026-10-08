@@ -379,12 +379,23 @@ export class ServicesService implements OnModuleInit {
           rec.errorMessage = undefined;
         }
       } else {
-        rec.status = 'stopped';
+        if (rec.status !== 'failed') {
+          rec.status = 'stopped';
+        }
       }
       records.push({ ...rec });
     }
 
     return records;
+  }
+
+  markServiceFailed(id: string, errorMessage?: string): void {
+    const s = this.services.get(id);
+    if (s) {
+      s.status = 'failed';
+      if (errorMessage) s.errorMessage = errorMessage;
+      this.saveToDisk();
+    }
   }
 
   async getService(id: string): Promise<ServiceRecord> {
@@ -408,7 +419,9 @@ export class ServicesService implements OnModuleInit {
             service.errorMessage = undefined;
           }
         } else {
-          service.status = 'stopped';
+          if (service.status !== 'failed') {
+            service.status = 'stopped';
+          }
         }
       } catch {}
     }

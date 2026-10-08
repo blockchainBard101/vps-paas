@@ -32,6 +32,7 @@ import {
   ChevronDown,
   ArrowDown,
   Activity,
+  Square,
 } from 'lucide-react';
 import {
   fetchServiceLogs,
@@ -143,8 +144,25 @@ export function ServiceDetailDrawer({
   onServiceDeleted,
 }: ServiceDetailDrawerProps) {
   const [isRedeploying, setIsRedeploying] = useState(false);
-  const isFailed = !isRedeploying && (service.status === 'failed' || service.status === 'error');
-  const isBuilding = isRedeploying || service.status === 'building' || service.status === 'deploying' || service.status === 'rebuilding';
+  // Persisted deployment history (past & in-flight builds)
+  const [deployHistory, setDeployHistory] = useState<
+    Array<{ id: string; status: 'building' | 'success' | 'failed'; createdAt: string; branch: string; repoName: string; logsCount: number }>
+  >([]);
+
+  const latestDeploy = deployHistory[0];
+  const isBuilding =
+    isRedeploying ||
+    service.status === 'building' ||
+    service.status === 'deploying' ||
+    service.status === 'rebuilding' ||
+    (latestDeploy?.status === 'building');
+  const isFailed =
+    !isBuilding &&
+    (service.status === 'failed' ||
+      service.status === 'error' ||
+      latestDeploy?.status === 'failed');
+  const isStopped = !isFailed && !isBuilding && service.status === 'stopped';
+
   const phaseLabel = (() => {
     const p = String(service.phase || '').toLowerCase();
     if (p === 'queued') return 'QUEUED';
@@ -340,11 +358,6 @@ export function ServiceDetailDrawer({
   useEffect(() => {
     autoScrollRef.current = autoScroll;
   }, [autoScroll]);
-
-  // Persisted deployment history (past & in-flight builds)
-  const [deployHistory, setDeployHistory] = useState<
-    Array<{ id: string; status: 'building' | 'success' | 'failed'; createdAt: string; branch: string; repoName: string; logsCount: number }>
-  >([]);
 
   // When a service is actively building, surface the live Build Logs immediately
   // so selecting a building node always shows real-time compilation output.
@@ -649,8 +662,10 @@ export function ServiceDetailDrawer({
         setSaveEnvNotice('Container restarted successfully');
       }
     } catch (err: any) {
-      setSettingsNotice({ type: 'error', msg: `Redeploy error: ${err.message}` });
-      setSaveEnvNotice(`Redeploy error: ${err.message}`);
+      const errMsg = err?.message || 'Deployment failed';
+      setSettingsNotice({ type: 'error', msg: `Redeploy error: ${errMsg}` });
+      setSaveEnvNotice(`Redeploy error: ${errMsg}`);
+      onServiceUpdated?.({ ...service, status: 'failed', errorMessage: errMsg });
     } finally {
       setIsRedeploying(false);
     }
@@ -699,12 +714,16 @@ export function ServiceDetailDrawer({
               ? 'bg-red-500/10 border-red-500/20 text-red-400'
               : isBuilding
               ? 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+              : isStopped
+              ? 'bg-zinc-500/10 border-zinc-500/20 text-zinc-400'
               : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
           }`}>
             {isFailed ? (
               <AlertCircle className="w-4 h-4" />
             ) : isBuilding ? (
               <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : isStopped ? (
+              <Square className="w-4 h-4" />
             ) : (
               <Globe className="w-4 h-4" />
             )}
@@ -717,6 +736,8 @@ export function ServiceDetailDrawer({
                   ? 'bg-red-500/10 border-red-500/20 text-red-400'
                   : isBuilding
                   ? 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+                  : isStopped
+                  ? 'bg-zinc-500/10 border-zinc-500/20 text-zinc-400'
                   : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
               }`}>
                 <span className={`w-1.5 h-1.5 rounded-full ${
@@ -724,6 +745,8 @@ export function ServiceDetailDrawer({
                     ? 'bg-red-400'
                     : isBuilding
                     ? 'bg-amber-400 animate-ping'
+                    : isStopped
+                    ? 'bg-zinc-400'
                     : 'bg-emerald-400 animate-pulse'
                 }`} />
                 <span>
@@ -731,6 +754,8 @@ export function ServiceDetailDrawer({
                     ? 'Failed'
                     : isBuilding
                     ? (service.status === 'deploying' ? 'Deploying' : 'Building')
+                    : isStopped
+                    ? 'Stopped'
                     : 'Running'}
                 </span>
               </span>
@@ -1888,7 +1913,9 @@ export function ServiceDetailDrawer({
                         onServiceUpdated?.(res.service);
                         setTimeout(() => setSettingsNotice(null), 4000);
                       } catch (err: any) {
-                        setSettingsNotice({ type: 'error', msg: err.message || 'Failed to rebuild and redeploy' });
+                        const errMsg = err?.message || 'Failed to rebuild and redeploy';
+                        setSettingsNotice({ type: 'error', msg: errMsg });
+                        onServiceUpdated?.({ ...service, status: 'failed', errorMessage: errMsg });
                       } finally {
                         setIsRedeploying(false);
                       }
