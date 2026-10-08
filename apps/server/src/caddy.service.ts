@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { DockerService } from './docker.service.js';
 import { ensureDataDir } from './config/paths.js';
 import fs from 'node:fs';
@@ -24,12 +24,18 @@ const CADDY_ADMIN_ORIGINS = ['localhost:2019', '127.0.0.1:2019', '0.0.0.0:2019']
  * and shown, and a resync can be triggered later.
  */
 @Injectable()
-export class CaddyService {
+export class CaddyService implements OnModuleInit {
   private adminUrl = process.env.CADDY_ADMIN_URL || 'http://localhost:2019';
   private readonly caddyfilePath: string;
 
   constructor(private readonly dockerService: DockerService) {
     this.caddyfilePath = path.join(ensureDataDir(), 'caddy', 'Caddyfile');
+  }
+
+  async onModuleInit() {
+    this.ensureRunning().catch((err) => {
+      console.warn('[Caddy] Auto-start notice:', err?.message || err);
+    });
   }
 
   async isAvailable(): Promise<boolean> {
