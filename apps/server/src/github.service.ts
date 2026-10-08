@@ -1734,7 +1734,7 @@ export class GitHubService implements OnModuleInit {
         for (const [k, v] of Object.entries(buildEnv)) {
           lines.push(`ENV ${k}=${String(v).replace(/\$/g, '\\$')}`);
         }
-        lines.push(`RUN ${buildCmd}`);
+        lines.push(`RUN ${buildCmd} && ([ -d dist/src ] && [ ! -f dist/main.js ] && cp -r dist/src/* dist/ 2>/dev/null || true)`);
         lines.push(`RUN ${pruneDev}`);
       } else {
         lines.push(`RUN ${installProd}`);
@@ -1980,6 +1980,8 @@ export class GitHubService implements OnModuleInit {
         fs.existsSync(path.join(appDir, 'schema.prisma'))
       );
 
+      let pkgModified = false;
+
       // If package.json build script has "prisma db push" or "prisma migrate deploy",
       // defer it to runtime container startup (since live DB is not connected during Docker image compilation).
       if (pkg?.scripts?.build && /\b(npx\s+)?prisma\s+(db\s+push|migrate\s+deploy)\b/.test(pkg.scripts.build)) {
@@ -1988,6 +1990,34 @@ export class GitHubService implements OnModuleInit {
           /\b(npx\s+)?prisma\s+(db\s+push|migrate\s+deploy)\b/g,
           'true /* deferred to container startup */',
         );
+        pkgModified = true;
+      }
+
+      // Railpack-style entrypoint aliasing for NestJS / TypeScript projects:
+      // When root-level TS files (such as prisma.config.ts) cause the TS compiler to output
+      // dist/src/main.js instead of dist/main.js, ensure post-build flattens dist/src into dist/
+      // so standard entrypoints like `node dist/main` succeed seamlessly.
+      const nestFlattenCmd = '([ -d dist/src ] && [ ! -f dist/main.js ] && cp -r dist/src/* dist/ 2>/dev/null || true)';
+      if (pkg?.scripts?.build && !pkg.scripts.build.includes('dist/src')) {
+        pkg.scripts.build = `${pkg.scripts.build} && ${nestFlattenCmd}`;
+        pkgModified = true;
+      }
+
+      // Also ensure any scripts calling `node dist/main` are resilient to either location:
+      if (pkg?.scripts) {
+        for (const [key, scriptVal] of Object.entries(pkg.scripts)) {
+          if (typeof scriptVal === 'string' && /\bnode\s+dist\/main(\.js)?\b/.test(scriptVal)) {
+            pkg.scripts[key] = scriptVal.replace(
+              /\bnode\s+dist\/main(\.js)?\b/g,
+              'node -e "const f=require(\'fs\'),p=f.existsSync(\'./dist/main.js\')?\'./dist/main\':f.existsSync(\'./dist/src/main.js\')?\'./dist/src/main\':\'./dist/main\';require(p)"',
+            );
+            pkgModified = true;
+            log(`[${new Date().toISOString()}] ℹ️ Aliased "${key}" entrypoint to auto-resolve dist/src/main.js vs dist/main.js\n`);
+          }
+        }
+      }
+
+      if (pkgModified) {
         try {
           fs.writeFileSync(path.join(appDir, 'package.json'), JSON.stringify(pkg, null, 2), 'utf8');
         } catch {}
@@ -2129,6 +2159,9 @@ export class GitHubService implements OnModuleInit {
           effectiveBuild = 'NODE_OPTIONS="--experimental-require-module" npm run build';
         }
         if (effectiveBuild) {
+          if (!effectiveBuild.includes('dist/src')) {
+            effectiveBuild = `${effectiveBuild} && ([ -d dist/src ] && [ ! -f dist/main.js ] && cp -r dist/src/* dist/ 2>/dev/null || true)`;
+          }
           nixArgs.push('--build-cmd', effectiveBuild);
         }
 
@@ -2145,6 +2178,12 @@ export class GitHubService implements OnModuleInit {
           }
         }
         if (effectiveStart) {
+          if (/\bnode\s+dist\/main(\.js)?\b/.test(effectiveStart)) {
+            effectiveStart = effectiveStart.replace(
+              /\bnode\s+dist\/main(\.js)?\b/g,
+              'node -e "const f=require(\'fs\'),p=f.existsSync(\'./dist/main.js\')?\'./dist/main\':f.existsSync(\'./dist/src/main.js\')?\'./dist/src/main\':\'./dist/main\';require(p)"',
+            );
+          }
           nixArgs.push('--start-cmd', effectiveStart);
         }
 
