@@ -424,13 +424,15 @@ export function ServiceDetailDrawer({
 
     es.onerror = () => {
       if (logSubTab === 'runtime') {
-        fetchServiceLogs(service.id, 100)
-          .then((data) => {
-            if (data.logs) {
-              setLogs((prev) => prev + '\n[PaaS LogStream] Container stream ended. Showing recent log buffer:\n' + data.logs);
-            }
-          })
-          .catch(() => {});
+        if (!receivedChunks) {
+          fetchServiceLogs(service.id, 100)
+            .then((data) => {
+              if (data.logs) {
+                setLogs((prev) => prev + '\n[PaaS LogStream] Container stream ended. Showing recent log buffer:\n' + data.logs);
+              }
+            })
+            .catch(() => {});
+        }
       } else {
         fetchBuildLogs(service.id)
           .then((data) => {
