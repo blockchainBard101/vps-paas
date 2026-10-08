@@ -40,6 +40,8 @@ import {
   fetchServices,
   fetchBuildStatus,
   updateServiceEnv,
+  redeployGitHubService,
+  restartService,
   fetchProject,
   saveProjectCanvas,
 } from '@/lib/api';
@@ -59,7 +61,9 @@ import {
   FolderKanban,
   Flame,
   Sliders,
-  ArrowLeft
+  ArrowLeft,
+  RotateCw,
+  X,
 } from 'lucide-react';
 
 // Custom wire edge component with an interactive disconnect button on hover / selection
@@ -176,6 +180,12 @@ export function RailwayCanvas({
   const [isGitHubModalOpen, setIsGitHubModalOpen] = useState(false);
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
   const [selectedServiceForDrawer, setSelectedServiceForDrawer] = useState<any | null>(null);
+  const [redeployPrompt, setRedeployPrompt] = useState<{
+    serviceId: string;
+    serviceName: string;
+    count: number;
+  } | null>(null);
+  const [isRedeployingCanvasService, setIsRedeployingCanvasService] = useState(false);
   const [currentOrg, setCurrentOrg] = useState('My Cloud');
 
   // Keep currentProject in sync with prop
@@ -458,7 +468,8 @@ export function RailwayCanvas({
           d.startedAt !== selectedServiceForDrawer.startedAt ||
           d.gitRepo !== selectedServiceForDrawer.gitRepo ||
           (d.domains || []).join(',') !== ((selectedServiceForDrawer as any).domains || []).join(',') ||
-          JSON.stringify(d.domainStatus || {}) !== JSON.stringify((selectedServiceForDrawer as any).domainStatus || {})
+          JSON.stringify(d.domainStatus || {}) !== JSON.stringify((selectedServiceForDrawer as any).domainStatus || {}) ||
+          JSON.stringify(d.env || {}) !== JSON.stringify((selectedServiceForDrawer as any).env || {})
         ) {
           setSelectedServiceForDrawer((prev: any) => ({
             ...prev,
@@ -644,6 +655,22 @@ export function RailwayCanvas({
       const mergedEnv = { ...existingEnv, ...envUpdates };
       svcData.env = mergedEnv;
 
+      // Update nodes so canvas immediately has the injected env
+      const updatedNodes = nodesRef.current.map((n) =>
+        n.id === svcNode.id
+          ? { ...n, data: { ...(n.data as any), env: mergedEnv } }
+          : n
+      );
+      nodesRef.current = updatedNodes;
+      setNodes(updatedNodes);
+
+      if (selectedServiceForDrawer && (selectedServiceForDrawer.id === svcNode.id || selectedServiceForDrawer.name === svcName)) {
+        setSelectedServiceForDrawer((prev: any) => ({
+          ...prev,
+          env: mergedEnv,
+        }));
+      }
+
       if (svcNode.id) {
         try {
           await updateServiceEnv(svcNode.id, mergedEnv);
@@ -655,11 +682,93 @@ export function RailwayCanvas({
       setLinkNotification(`✨ Injected \${{ ${dbName}.${isRedis ? 'REDIS_URL' : 'DATABASE_URL'} }} into ${svcName}!`);
       setTimeout(() => setLinkNotification(null), 3500);
 
+      // Prompt user with redeploy toast to apply changes
+      setRedeployPrompt({
+        serviceId: svcNode.id,
+        serviceName: svcName,
+        count: Object.keys(envUpdates).length,
+      });
+
       // Persist canvas
-      saveProjectCanvas(currentProject, nodesRef.current, newEdges).catch(() => {});
+      saveProjectCanvas(currentProject, updatedNodes, newEdges).catch(() => {});
     },
-    [currentProject, setEdges]
+    [currentProject, setEdges, selectedServiceForDrawer]
   );
+
+  async function handleTriggerCanvasRedeploy(serviceId: string) {
+    setIsRedeployingCanvasService(true);
+    const targetNode = nodesRef.current.find((n) => n.id === serviceId);
+    const data = (targetNode?.data as any) || {};
+    const svcName = data.name || 'service';
+    const isGit = Boolean(data.gitRepo);
+
+    // Optimistically reflect building state on canvas
+    setNodes((prev: Node[]) =>
+      prev.map((n: Node) =>
+        n.id === serviceId
+          ? { ...n, data: { ...n.data, status: 'building', phase: 'queued' } }
+          : n
+      )
+    );
+    if (selectedServiceForDrawer && (selectedServiceForDrawer.id === serviceId || selectedServiceForDrawer.name === svcName)) {
+      setSelectedServiceForDrawer((prev: any) => ({
+        ...prev,
+        status: 'building',
+        phase: 'queued',
+      }));
+    }
+    setLinkNotification(`🔄 Rebuilding & redeploying ${svcName}...`);
+
+    try {
+      if (isGit) {
+        const repoName = data.gitRepo?.split('/').pop()?.replace(/\.git$/, '') || svcName;
+        const res = await redeployGitHubService(serviceId, {
+          repoName,
+          branch: data.gitBranch || data.branch || 'main',
+          cloneUrl: data.gitRepo || '',
+          dockerfilePath: data.dockerfilePath,
+          buildMethod: data.buildMethod,
+          runtimeMode: data.runtimeMode,
+          subfolder: data.subfolder,
+          port: data.port || 3000,
+          installCommand: data.installCommand,
+          buildCommand: data.buildCommand,
+          startCommand: data.startCommand,
+          systemPackages: data.systemPackages,
+          nodeVersion: data.nodeVersion,
+          env: data.env || {},
+        });
+        setLinkNotification(`🚀 ${svcName} redeployed and live!`);
+        setTimeout(() => setLinkNotification(null), 4000);
+        setNodes((prev: Node[]) =>
+          prev.map((n: Node) =>
+            n.id === serviceId
+              ? { ...n, data: { ...n.data, ...res.service, status: 'running' } }
+              : n
+          )
+        );
+        if (selectedServiceForDrawer && (selectedServiceForDrawer.id === serviceId || selectedServiceForDrawer.name === svcName)) {
+          setSelectedServiceForDrawer(res.service);
+        }
+      } else {
+        await restartService(serviceId);
+        setLinkNotification(`🔄 ${svcName} restarted successfully!`);
+        setTimeout(() => setLinkNotification(null), 3000);
+      }
+    } catch (err: any) {
+      setLinkNotification(`❌ Redeploy failed: ${err.message}`);
+      setTimeout(() => setLinkNotification(null), 5000);
+      setNodes((prev: Node[]) =>
+        prev.map((n: Node) =>
+          n.id === serviceId
+            ? { ...n, data: { ...n.data, status: 'failed', errorMessage: err.message } }
+            : n
+        )
+      );
+    } finally {
+      setIsRedeployingCanvasService(false);
+    }
+  }
 
   async function addNewPostgres(customName?: string) {
     const dbName = customName?.trim() || `postgres-${Math.floor(Math.random() * 900 + 100)}`;
@@ -1282,6 +1391,55 @@ export function RailwayCanvas({
         }}
         onOpenDashboard={onBackToProjects}
       />
+
+      {/* Floating Redeploy Prompt after drag-and-drop database linking */}
+      {redeployPrompt && (
+        <div className="fixed bottom-6 right-6 z-[80] w-96 rounded-2xl border border-indigo-500/40 bg-zinc-950/95 backdrop-blur-xl shadow-2xl p-4 animate-in slide-in-from-bottom-4 fade-in">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400 shrink-0">
+              <Sparkles className="w-5 h-5 animate-pulse" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-semibold text-zinc-100 flex items-center gap-1.5">
+                <span>Variables injected into {redeployPrompt.serviceName}</span>
+              </div>
+              <div className="text-xs text-zinc-400 mt-1 leading-relaxed">
+                Database connection variables injected. Redeploy the service now to apply changes to the running container?
+              </div>
+              <div className="flex items-center gap-2.5 mt-3.5">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const sid = redeployPrompt.serviceId;
+                    setRedeployPrompt(null);
+                    await handleTriggerCanvasRedeploy(sid);
+                  }}
+                  disabled={isRedeployingCanvasService}
+                  className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 cursor-pointer shadow-lg shadow-indigo-600/30 transition-all"
+                >
+                  <RotateCw className={`w-3.5 h-3.5 ${isRedeployingCanvasService ? 'animate-spin' : ''}`} />
+                  <span>{isRedeployingCanvasService ? 'Redeploying...' : 'Redeploy Now'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRedeployPrompt(null)}
+                  className="px-3 py-2 text-zinc-400 hover:text-zinc-200 text-xs font-medium cursor-pointer transition-colors"
+                >
+                  Later
+                </button>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setRedeployPrompt(null)}
+              className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 rounded-lg cursor-pointer shrink-0 transition-colors"
+              title="Dismiss"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
