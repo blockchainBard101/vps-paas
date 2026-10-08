@@ -23,7 +23,8 @@ export interface ServiceRecord {
   image: string;
   containerId: string;
   containerName: string;
-  status: 'running' | 'stopped' | 'restarting';
+  status: 'running' | 'stopped' | 'restarting' | 'failed';
+  errorMessage?: string;
   port?: number;
   internalPort?: number;
   containerIp?: string;
@@ -293,6 +294,76 @@ export class ServicesService implements OnModuleInit {
     }
   }
 
+  private async evaluateContainerHealth(
+    live: any,
+  ): Promise<{ status: 'running' | 'stopped' | 'restarting' | 'failed'; errorMessage?: string }> {
+    let isCrashLoop = false;
+    let crashError: string | undefined;
+
+    const liveStatus = (live.Status || '').toLowerCase();
+    const liveState = (live.State || '').toLowerCase();
+
+    if (liveState === 'restarting' || liveStatus.includes('restarting')) {
+      isCrashLoop = true;
+      crashError = 'Container is in a crash loop (auto-restarting)';
+    }
+
+    try {
+      const container = this.dockerService.client.getContainer(live.Id);
+      const inspect = await container.inspect();
+      if (inspect.State) {
+        if (inspect.State.Restarting) {
+          isCrashLoop = true;
+          crashError = 'Container is in a crash loop (auto-restarting)';
+        } else if (!inspect.State.Running && inspect.State.ExitCode !== 0) {
+          isCrashLoop = true;
+          crashError = inspect.State.Error || `Container exited with code ${inspect.State.ExitCode}`;
+        } else if (inspect.State.Running && (inspect.RestartCount || 0) > 0) {
+          const startedAt = new Date(inspect.State.StartedAt).getTime();
+          const uptimeSec = (Date.now() - startedAt) / 1000;
+          // If restarted multiple times and has been up for less than 45 seconds, it is actively flapping
+          if (inspect.RestartCount >= 2 && uptimeSec < 45) {
+            isCrashLoop = true;
+            crashError = `Container is in a crash loop (restarted ${inspect.RestartCount} times)`;
+          }
+        }
+      }
+    } catch {}
+
+    if (isCrashLoop) {
+      try {
+        const logsBuffer = await this.dockerService.client.getContainer(live.Id).logs({
+          stderr: true,
+          stdout: true,
+          tail: 15,
+        });
+        const raw = logsBuffer.toString('utf8').replace(/[\x00-\x09\x0B-\x1F\x7F]/g, '').trim();
+        const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+        const errLine = lines
+          .slice()
+          .reverse()
+          .find(
+            (l) =>
+              l.toLowerCase().includes('error:') ||
+              l.toLowerCase().includes('error [') ||
+              l.startsWith('npm ERR!') ||
+              l.toLowerCase().includes('failed') ||
+              l.toLowerCase().includes('exception'),
+          );
+        if (errLine) {
+          crashError = errLine.replace(/^.*Error:\s*/i, 'Error: ');
+        }
+      } catch {}
+
+      return { status: 'failed', errorMessage: crashError || 'Container crashed on startup' };
+    }
+
+    return {
+      status: liveState === 'running' ? 'running' : 'stopped',
+      errorMessage: undefined,
+    };
+  }
+
   async listServices(): Promise<ServiceRecord[]> {
     const records: ServiceRecord[] = [];
     const containers = await this.dockerService.client.listContainers({ all: true });
@@ -300,7 +371,13 @@ export class ServicesService implements OnModuleInit {
     for (const [id, rec] of this.services.entries()) {
       const live = containers.find((c) => c.Id === rec.containerId || c.Names.includes(`/${rec.containerName}`));
       if (live) {
-        rec.status = live.State === 'running' ? 'running' : 'stopped';
+        const health = await this.evaluateContainerHealth(live);
+        rec.status = health.status;
+        if (health.errorMessage) {
+          rec.errorMessage = health.errorMessage;
+        } else if (health.status === 'running') {
+          rec.errorMessage = undefined;
+        }
       } else {
         rec.status = 'stopped';
       }
@@ -315,6 +392,27 @@ export class ServicesService implements OnModuleInit {
     if (!service) {
       throw new NotFoundException(`Service '${id}' not found`);
     }
+
+    if (service.containerId || service.containerName) {
+      try {
+        const containers = await this.dockerService.client.listContainers({ all: true });
+        const live = containers.find(
+          (c) => c.Id === service.containerId || c.Names.includes(`/${service.containerName}`),
+        );
+        if (live) {
+          const health = await this.evaluateContainerHealth(live);
+          service.status = health.status;
+          if (health.errorMessage) {
+            service.errorMessage = health.errorMessage;
+          } else if (health.status === 'running') {
+            service.errorMessage = undefined;
+          }
+        } else {
+          service.status = 'stopped';
+        }
+      } catch {}
+    }
+
     return service;
   }
 

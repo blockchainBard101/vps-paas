@@ -370,6 +370,7 @@ export function RailwayCanvas({
                 if (
                   nodeData.status !== desiredStatus ||
                   nodeData.phase !== desiredPhase ||
+                  nodeData.errorMessage !== realService.errorMessage ||
                   nodeData.port !== realService.port ||
                   nodeData.createdAt !== realService.createdAt ||
                   nodeData.startedAt !== realService.startedAt ||
@@ -385,6 +386,7 @@ export function RailwayCanvas({
                       name: realService.name,
                       status: desiredStatus,
                       phase: desiredPhase,
+                      errorMessage: realService.errorMessage || (desiredStatus === 'failed' ? nodeData.errorMessage : undefined),
                       port: realService.port || nodeData.port || 3000,
                       gitRepo: realService.gitRepo || nodeData.gitRepo,
                       gitBranch: realService.gitBranch || nodeData.gitBranch,
