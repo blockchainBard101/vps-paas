@@ -246,7 +246,7 @@ export function ProjectSwitcherModal({
           ) : (
             <span>Every project has an isolated Docker network & environment space</span>
           )}
-          <span className="text-[11px] text-zinc-500">Railway Multi-Tenancy</span>
+          <span className="text-[11px] text-zinc-500">NoWay Multi-Tenancy</span>
         </div>
       </div>
     </div>

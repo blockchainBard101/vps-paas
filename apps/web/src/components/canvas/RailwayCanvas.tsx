@@ -783,7 +783,7 @@ export function RailwayCanvas({
             <div className="w-7 h-7 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-600/30">
               <Layers className="w-4 h-4 text-white" />
             </div>
-            <span>RAILWAY</span>
+            <span>NOWAY</span>
           </div>
 
           <span className="text-zinc-700">/</span>

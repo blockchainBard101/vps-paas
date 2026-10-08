@@ -593,20 +593,37 @@ export function SystemSettingsView({
           </nav>
         </div>
 
-        {/* Bottom Profile Footer (Matches Screenshot User Tile) */}
+        {/* Bottom Profile Footer */}
         <div className="p-3 border-t border-zinc-900 bg-[#09090b]">
           <div className="flex items-center justify-between gap-3 p-2 rounded-xl hover:bg-zinc-900/50 transition-colors">
             <div className="flex items-center gap-3">
-              {/* White Square Avatar with GA */}
-              <div className="w-9 h-9 bg-white rounded flex items-center justify-center font-bold text-black text-xs shadow-sm">
-                GA
-              </div>
+              {gitStatus?.user?.avatarUrl ? (
+                <img
+                  src={gitStatus.user.avatarUrl}
+                  alt={gitStatus.user.name || gitStatus.user.login || 'NoWay Admin'}
+                  className="w-9 h-9 rounded object-cover shadow-sm border border-zinc-800"
+                />
+              ) : (
+                <div className="w-9 h-9 bg-white rounded flex items-center justify-center font-bold text-black text-xs shadow-sm">
+                  {gitStatus?.user?.name
+                    ? gitStatus.user.name
+                        .split(' ')
+                        .filter(Boolean)
+                        .map((w: string) => w[0])
+                        .slice(0, 2)
+                        .join('')
+                        .toUpperCase()
+                    : gitStatus?.user?.login
+                    ? gitStatus.user.login.slice(0, 2).toUpperCase()
+                    : 'NW'}
+                </div>
+              )}
               <div className="overflow-hidden">
                 <div className="text-xs font-semibold text-zinc-100 truncate">
-                  George Alainengiya
+                  {gitStatus?.user?.name || gitStatus?.user?.login || 'NoWay Admin'}
                 </div>
                 <div className="text-[10px] font-mono tracking-wider text-zinc-500 font-bold uppercase">
-                  OWNER
+                  {gitStatus?.user?.login ? `@${gitStatus.user.login}` : 'OWNER'}
                 </div>
               </div>
             </div>
@@ -1457,7 +1474,7 @@ export function SystemSettingsView({
             <div>
               <h2 className="text-xl font-bold tracking-tight text-zinc-100">API Access & CLI Tokens</h2>
               <p className="text-xs text-zinc-400 mt-1">
-                Generate programmatic access tokens for Railway CLI, GitHub Actions, and automation scripts.
+                Generate programmatic access tokens for NoWay CLI, GitHub Actions, and automation scripts.
               </p>
             </div>
 
@@ -1858,7 +1875,7 @@ export function SystemSettingsView({
             <div>
               <h2 className="text-xl font-bold tracking-tight text-zinc-100">Platform Releases & Updates</h2>
               <p className="text-xs text-zinc-400 mt-1">
-                Keep your Railway + Neon PaaS platform updated with the latest upstream Git releases.
+                Keep your NoWay PaaS platform updated with the latest upstream Git releases.
               </p>
             </div>
 

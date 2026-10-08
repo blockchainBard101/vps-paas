@@ -28,7 +28,9 @@ import {
   fetchProjects,
   createProject,
   deleteProject,
+  fetchGitHubStatus,
   ProjectRecord,
+  GitHubStatus,
 } from '@/lib/api';
 import { PostgresLogo, RedisLogo } from '../icons/DatabaseLogos';
 import { DeleteProjectModal } from './DeleteProjectModal';
@@ -56,6 +58,26 @@ export function ProjectsDashboard({
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
   const [projectToDelete, setProjectToDelete] = useState<{ id: string; name: string } | null>(null);
   const [isDeletingProject, setIsDeletingProject] = useState(false);
+  const [gitStatus, setGitStatus] = useState<GitHubStatus | null>(null);
+
+  useEffect(() => {
+    fetchGitHubStatus().then((s) => setGitStatus(s)).catch(() => {});
+  }, []);
+
+  const userName = gitStatus?.user?.name || gitStatus?.user?.login || 'NoWay Admin';
+  const userAvatar = gitStatus?.user?.avatarUrl;
+  const userInitials = gitStatus?.user?.name
+    ? gitStatus.user.name
+        .split(' ')
+        .filter(Boolean)
+        .map((w: string) => w[0])
+        .slice(0, 2)
+        .join('')
+        .toUpperCase()
+    : gitStatus?.user?.login
+    ? gitStatus.user.login.slice(0, 2).toUpperCase()
+    : 'NW';
+  const userRole = gitStatus?.user?.login ? `@${gitStatus.user.login}` : 'OWNER';
 
   useEffect(() => {
     loadProjects();
@@ -132,7 +154,7 @@ export function ProjectsDashboard({
             <div className="w-7 h-7 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-600/30">
               <Layers className="w-4 h-4 text-white" />
             </div>
-            <span>RAILWAY PAAS</span>
+            <span>NOWAY PAAS</span>
           </div>
 
           <span className="text-zinc-700">/</span>
@@ -179,15 +201,19 @@ export function ProjectsDashboard({
               className="flex items-center gap-2 pl-1.5 pr-2.5 py-1 bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 rounded-xl transition-colors cursor-pointer group"
               title="Open System Settings"
             >
-              <div className="w-6 h-6 bg-white text-black font-bold text-[10px] rounded flex items-center justify-center shadow-sm">
-                GA
-              </div>
+              {userAvatar ? (
+                <img src={userAvatar} alt={userName} className="w-6 h-6 rounded object-cover shadow-sm" />
+              ) : (
+                <div className="w-6 h-6 bg-white text-black font-bold text-[10px] rounded flex items-center justify-center shadow-sm">
+                  {userInitials}
+                </div>
+              )}
               <div className="text-left hidden sm:block">
                 <div className="text-[11px] font-semibold text-zinc-200 group-hover:text-white leading-tight">
-                  George A.
+                  {userName}
                 </div>
                 <div className="text-[9px] font-mono text-zinc-500 uppercase leading-none">
-                  OWNER
+                  {userRole}
                 </div>
               </div>
             </button>
