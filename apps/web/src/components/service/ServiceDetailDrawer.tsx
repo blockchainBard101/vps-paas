@@ -189,6 +189,7 @@ export function ServiceDetailDrawer({
   const [rawEnvText, setRawEnvText] = useState('');
   const [isSavingRaw, setIsSavingRaw] = useState(false);
   const [showRedeployToast, setShowRedeployToast] = useState(false);
+  const [redeployToastTitle, setRedeployToastTitle] = useState('Environment variables updated');
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editKey, setEditKey] = useState('');
   const [editValue, setEditValue] = useState('');
@@ -609,6 +610,7 @@ export function ServiceDetailDrawer({
       await updateServiceEnv(service.id, envMap);
       setSaveEnvNotice('Variables updated & committed');
       setTimeout(() => setSaveEnvNotice(null), 3000);
+      setRedeployToastTitle('Environment variables updated');
       setShowRedeployToast(true);
       onServiceUpdated?.({ ...service, env: envMap });
     } catch (err: any) {
@@ -1855,6 +1857,8 @@ export function ServiceDetailDrawer({
                       });
                       setSettingsSaved(true);
                       setSettingsNotice({ type: 'success', msg: 'Settings saved successfully!' });
+                      setRedeployToastTitle('Service settings updated');
+                      setShowRedeployToast(true);
                       setTimeout(() => {
                         setSettingsSaved(false);
                         setSettingsNotice(null);
@@ -2036,7 +2040,7 @@ export function ServiceDetailDrawer({
               <Sparkles className="w-4 h-4" />
             </div>
             <div className="flex-1 min-w-0">
-              <div className="text-xs font-semibold text-zinc-100">Environment variables updated</div>
+              <div className="text-xs font-semibold text-zinc-100">{redeployToastTitle}</div>
               <div className="text-[11px] text-zinc-400 mt-0.5">
                 Redeploy to apply the changes to the running container.
               </div>
