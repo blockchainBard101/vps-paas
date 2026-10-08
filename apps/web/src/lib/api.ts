@@ -326,6 +326,7 @@ export interface ServiceSettingsUpdate {
   repoName?: string;
   branch?: string;
   cloneUrl?: string;
+  env?: Record<string, string>;
 }
 
 export interface ServiceRecord {

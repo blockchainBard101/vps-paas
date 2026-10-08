@@ -628,6 +628,7 @@ export function ServiceDetailDrawer({
           startCommand,
           systemPackages,
           nodeVersion,
+          env: service.env || {},
         });
         setSaveEnvNotice('Redeployment complete! Container is live.');
         onServiceUpdated?.(result.service);
@@ -1842,6 +1843,7 @@ export function ServiceDetailDrawer({
                           startCommand: startCommand.trim() || undefined,
                           systemPackages: systemPackages.trim() || undefined,
                           nodeVersion: nodeVersion.trim() || undefined,
+                          env: service.env || {},
                         });
                         setSettingsNotice({ type: 'success', msg: 'Service rebuilt & redeployed successfully!' });
                         onServiceUpdated?.(res.service);

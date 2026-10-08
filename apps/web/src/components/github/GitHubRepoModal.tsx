@@ -59,6 +59,7 @@ export interface PendingDeployInfo {
   subfolder?: string;
   port: number;
   buildStrategy: string;
+  env?: Record<string, string>;
 }
 
 interface GitHubRepoModalProps {
@@ -491,6 +492,7 @@ export function GitHubRepoModal({
       subfolder: targetSubfolder,
       port,
       buildStrategy: strategy,
+      env: envRecord,
     });
 
     // 2. Immediately close modal as requested:

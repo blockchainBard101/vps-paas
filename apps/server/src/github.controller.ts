@@ -419,6 +419,7 @@ export class GitHubController {
       startCommand?: string;
       systemPackages?: string;
       nodeVersion?: string;
+      env?: Record<string, string>;
     },
   ) {
     return this.githubService.redeployService(serviceId, body);

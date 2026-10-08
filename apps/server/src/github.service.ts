@@ -1993,21 +1993,24 @@ export class GitHubService implements OnModuleInit {
         } catch {}
       }
 
-      const mergedEnv: Record<string, string> = { ...(options.env || {}) };
+      const runtimeEnv: Record<string, string> = { ...(options.env || {}) };
       if (hasPrisma || !options.nodeVersion || options.nodeVersion === '22' || options.nodeVersion === '20') {
-        if (!mergedEnv.NODE_OPTIONS) {
-          mergedEnv.NODE_OPTIONS = '--experimental-require-module';
-        } else if (!mergedEnv.NODE_OPTIONS.includes('--experimental-require-module')) {
-          mergedEnv.NODE_OPTIONS = `${mergedEnv.NODE_OPTIONS} --experimental-require-module`;
+        if (!runtimeEnv.NODE_OPTIONS) {
+          runtimeEnv.NODE_OPTIONS = '--experimental-require-module';
+        } else if (!runtimeEnv.NODE_OPTIONS.includes('--experimental-require-module')) {
+          runtimeEnv.NODE_OPTIONS = `${runtimeEnv.NODE_OPTIONS} --experimental-require-module`;
         }
       }
-      if (hasPrisma && !mergedEnv.DATABASE_URL) {
-        // Safe build-time dummy so Prisma schema/client validation passes if referenced during build
-        mergedEnv.DATABASE_URL = 'postgresql://postgres:postgres@127.0.0.1:5432/postgres';
+
+      // Build-time compiler environment (used strictly during Docker image compilation).
+      // Fallback DATABASE_URL satisfies build-time validation without being injected into container runtime.
+      const buildEnv: Record<string, string> = { ...runtimeEnv };
+      if (hasPrisma && !buildEnv.DATABASE_URL) {
+        buildEnv.DATABASE_URL = 'postgresql://postgres:postgres@127.0.0.1:5432/postgres';
       }
 
       // ── "Fast" preset: generate a slim Dockerfile (opt-in) ──────────────────
-      const publicBuildEnv = this.getPublicBuildEnv(mergedEnv);
+      const publicBuildEnv = this.getPublicBuildEnv(buildEnv);
       const slimDockerfile =
         options.buildMethod === 'slim'
           ? this.generateSlimDockerfile(appDir, { ...options, staticSite, buildEnv: publicBuildEnv })
@@ -2145,7 +2148,7 @@ export class GitHubService implements OnModuleInit {
           nixArgs.push('--start-cmd', effectiveStart);
         }
 
-        for (const [k, v] of Object.entries(mergedEnv)) {
+        for (const [k, v] of Object.entries(buildEnv)) {
           nixArgs.push('--env', `${k}=${v}`);
         }
         await this.runProcess('nixpacks', nixArgs, {
@@ -2183,7 +2186,7 @@ export class GitHubService implements OnModuleInit {
         startCommand: options.startCommand,
         systemPackages: options.systemPackages,
         nodeVersion: options.nodeVersion,
-        env: mergedEnv,
+        env: runtimeEnv,
       });
 
       session.ids.add(service.id);
@@ -2256,6 +2259,7 @@ export class GitHubService implements OnModuleInit {
       startCommand?: string;
       systemPackages?: string;
       nodeVersion?: string;
+      env?: Record<string, string>;
     }
   ): Promise<{ service: ServiceRecord; git: any }> {
     let existing: ServiceRecord | undefined;
@@ -2318,7 +2322,7 @@ export class GitHubService implements OnModuleInit {
       systemPackages,
       nodeVersion,
       port,
-      env: existing?.env || {},
+      env: overrides?.env !== undefined ? overrides.env : (existing?.env || {}),
     });
 
     return result;

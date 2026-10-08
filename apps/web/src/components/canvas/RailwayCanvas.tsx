@@ -1178,7 +1178,7 @@ export function RailwayCanvas({
               buildStrategy: info.buildStrategy,
               cpuPercent: '—',
               memoryUsage: '—',
-              env: {},
+              env: info.env || {},
             },
           };
           const nextNodes = [...nodes, newNode];
