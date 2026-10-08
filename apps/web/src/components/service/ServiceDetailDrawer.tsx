@@ -637,7 +637,8 @@ export function ServiceDetailDrawer({
         setSaveEnvNotice('Container restarted successfully');
       }
     } catch (err: any) {
-      alert(`Redeploy error: ${err.message}`);
+      setSettingsNotice({ type: 'error', msg: `Redeploy error: ${err.message}` });
+      setSaveEnvNotice(`Redeploy error: ${err.message}`);
     } finally {
       setIsRedeploying(false);
     }
