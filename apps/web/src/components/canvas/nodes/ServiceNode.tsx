@@ -47,7 +47,7 @@ export function ServiceNode({ data, selected }: { data: any; selected: boolean }
 
   return (
     <div
-      onClick={() => data.onOpenDetails?.()}
+      onClick={() => data.onOpenDetails?.('deployments')}
       className={`w-72 rounded-xl border bg-zinc-900/95 p-4 shadow-2xl backdrop-blur-md transition-all duration-200 select-none cursor-pointer ${
         isBuilding
           ? 'border-amber-500/80 ring-2 ring-amber-500/30 shadow-amber-500/10 animate-pulse'
@@ -198,7 +198,7 @@ export function ServiceNode({ data, selected }: { data: any; selected: boolean }
         <button
           onClick={(e) => {
             e.stopPropagation();
-            data.onOpenDetails?.();
+            data.onOpenDetails?.('settings');
           }}
           className="py-1.5 px-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
         >

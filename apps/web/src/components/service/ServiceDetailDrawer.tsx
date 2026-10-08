@@ -92,6 +92,7 @@ interface ServiceDetailDrawerProps {
   };
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: 'deployments' | 'variables' | 'domains' | 'logs' | 'settings';
   onServiceUpdated?: (updated: any) => void;
   onServiceDeleted?: (id: string) => void;
 }
@@ -116,9 +117,9 @@ function isSystemEnvKey(key: string): boolean {
   return SYSTEM_ENV_PREFIXES.some((p) => u.startsWith(p));
 }
 
-function isMaskedKey(key: string): boolean {
-  const k = (key || '').toLowerCase();
-  return k.includes('secret') || k.includes('pass') || k.includes('token') || k.includes('key');
+function isMaskedKey(_key?: string): boolean {
+  // All variables masked/hidden by default for safety & confidentiality
+  return true;
 }
 
 function timeAgo(isoString: string): string {
@@ -137,6 +138,7 @@ export function ServiceDetailDrawer({
   service,
   isOpen,
   onClose,
+  initialTab = 'deployments',
   onServiceUpdated,
   onServiceDeleted,
 }: ServiceDetailDrawerProps) {
@@ -152,7 +154,14 @@ export function ServiceDetailDrawer({
     if (p === 'running') return 'STARTING';
     return service.status?.toUpperCase() ?? 'BUILDING';
   })();
-  const [activeTab, setActiveTab] = useState<'deployments' | 'variables' | 'domains' | 'logs' | 'settings'>('variables');
+  const [activeTab, setActiveTab] = useState<'deployments' | 'variables' | 'domains' | 'logs' | 'settings'>(initialTab);
+
+  // Sync tab whenever initialTab or service ID changes
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab, service.id]);
 
   // Variables state
   const [envVars, setEnvVars] = useState<{ key: string; value: string; masked: boolean }[]>([]);
@@ -503,7 +512,7 @@ export function ServiceDetailDrawer({
       {
         key: newKey.trim(),
         value: newValue.trim(),
-        masked: newKey.toLowerCase().includes('secret') || newKey.toLowerCase().includes('pass'),
+        masked: true,
       },
     ];
     setEnvVars(updated);
@@ -979,6 +988,22 @@ export function ServiceDetailDrawer({
               </div>
 
               <div className="flex items-center gap-2">
+                {envVars.length > 0 && envViewMode === 'table' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const allMasked = envVars.every((v) => v.masked);
+                      const next = !allMasked;
+                      setEnvVars((prev) => prev.map((v) => ({ ...v, masked: next })));
+                      setSystemEnvVars((prev) => prev.map((v) => ({ ...v, masked: next })));
+                    }}
+                    className="px-2.5 py-1 rounded-lg border border-zinc-800 bg-zinc-950 hover:bg-zinc-900 text-zinc-400 hover:text-zinc-200 text-[11px] font-mono flex items-center gap-1.5 transition-colors cursor-pointer"
+                    title={envVars.every((v) => v.masked) ? 'Reveal all variables' : 'Hide all variables'}
+                  >
+                    {envVars.every((v) => v.masked) ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                    <span>{envVars.every((v) => v.masked) ? 'Reveal all' : 'Hide all'}</span>
+                  </button>
+                )}
                 <div className="inline-flex rounded-lg bg-zinc-950 p-0.5 border border-zinc-800 text-[11px] font-mono">
                   <button
                     type="button"
@@ -1175,9 +1200,21 @@ export function ServiceDetailDrawer({
                           className="flex items-center justify-between gap-3 text-[11px] font-mono text-zinc-500"
                         >
                           <span className="w-1/3 truncate">{v.key}</span>
-                          <span className="flex-1 truncate text-zinc-600 bg-zinc-950/60 px-2 py-0.5 rounded border border-zinc-900">
-                            {v.value}
+                          <span className="flex-1 truncate text-zinc-500 bg-zinc-950/60 px-2 py-0.5 rounded border border-zinc-900">
+                            {v.masked ? '••••••••••••••••••••••••' : v.value}
                           </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const updated = [...systemEnvVars];
+                              updated[idx].masked = !updated[idx].masked;
+                              setSystemEnvVars(updated);
+                            }}
+                            className="p-1 text-zinc-500 hover:text-zinc-300 rounded cursor-pointer shrink-0"
+                            title={v.masked ? 'Reveal value' : 'Hide value'}
+                          >
+                            {v.masked ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                          </button>
                         </div>
                       ))}
                     </div>

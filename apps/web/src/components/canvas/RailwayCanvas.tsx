@@ -180,6 +180,7 @@ export function RailwayCanvas({
   const [isGitHubModalOpen, setIsGitHubModalOpen] = useState(false);
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
   const [selectedServiceForDrawer, setSelectedServiceForDrawer] = useState<any | null>(null);
+  const [drawerInitialTab, setDrawerInitialTab] = useState<'deployments' | 'variables' | 'domains' | 'logs' | 'settings'>('deployments');
   const [redeployPrompt, setRedeployPrompt] = useState<{
     serviceId: string;
     serviceName: string;
@@ -1005,7 +1006,8 @@ export function RailwayCanvas({
                         ? 'build'
                         : 'runtime',
                   }),
-                onOpenDetails: () =>
+                onOpenDetails: (tab?: 'deployments' | 'variables' | 'domains' | 'logs' | 'settings') => {
+                  setDrawerInitialTab(tab || 'deployments');
                   setSelectedServiceForDrawer({
                     id: n.id,
                     name: String(nodeData.name || n.id),
@@ -1023,7 +1025,8 @@ export function RailwayCanvas({
                     errorMessage: nodeData.errorMessage,
                     createdAt: nodeData.createdAt,
                     startedAt: nodeData.startedAt,
-                  }),
+                  });
+                },
               },
             };
           })}
@@ -1043,6 +1046,7 @@ export function RailwayCanvas({
           onNodeClick={(_event: React.MouseEvent, node: Node) => {
             const nodeData = (node.data || {}) as Record<string, any>;
             if (node.type === 'serviceNode') {
+              setDrawerInitialTab('deployments');
               setSelectedServiceForDrawer({
                 id: node.id,
                 name: String(nodeData.name || node.id),
@@ -1358,6 +1362,7 @@ export function RailwayCanvas({
         <ServiceDetailDrawer
           service={selectedServiceForDrawer}
           isOpen={true}
+          initialTab={drawerInitialTab}
           onClose={() => setSelectedServiceForDrawer(null)}
           onServiceUpdated={(updated) => {
             const nextNodes = nodesRef.current.map((n) =>
