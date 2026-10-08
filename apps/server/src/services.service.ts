@@ -26,6 +26,7 @@ export interface ServiceRecord {
   status: 'running' | 'stopped' | 'restarting';
   port?: number;
   internalPort?: number;
+  containerIp?: string;
   gitRepo?: string;
   gitBranch?: string;
   subfolder?: string;
@@ -227,6 +228,10 @@ export class ServicesService implements OnModuleInit {
         let internalPort: number | undefined;
         if (exposedKeys.length > 0) internalPort = parseInt(exposedKeys[0].replace(/\/tcp$/, ''), 10);
 
+        const containerIp =
+          inspect.NetworkSettings?.Networks?.['paas-internal-network']?.IPAddress ||
+          (inspect.NetworkSettings as any)?.IPAddress;
+
         const existing = this.services.get(serviceId);
         if (existing) {
           // Known service → keep the control-plane-owned env/settings intact;
@@ -237,6 +242,7 @@ export class ServicesService implements OnModuleInit {
           existing.status = info.State === 'running' ? 'running' : 'stopped';
           existing.port = hostPort ?? existing.port;
           existing.internalPort = internalPort ?? existing.internalPort;
+          existing.containerIp = containerIp || existing.containerIp;
           existing.startedAt = inspect.State?.StartedAt || existing.startedAt;
           changed = true;
         } else {
@@ -417,6 +423,9 @@ export class ServicesService implements OnModuleInit {
       const hostPort = inspect.NetworkSettings.Ports[portKey]?.[0]?.HostPort
         ? parseInt(inspect.NetworkSettings.Ports[portKey][0].HostPort, 10)
         : undefined;
+      const containerIp =
+        inspect.NetworkSettings?.Networks?.['paas-internal-network']?.IPAddress ||
+        (inspect.NetworkSettings as any)?.IPAddress;
 
       const record: ServiceRecord = {
         id: serviceId,
@@ -427,6 +436,7 @@ export class ServicesService implements OnModuleInit {
         status: 'running',
         port: hostPort,
         internalPort: exposedPort,
+        containerIp,
         gitRepo: options.gitRepo,
         gitBranch: options.gitBranch,
         subfolder: options.subfolder,
@@ -802,7 +812,14 @@ export class ServicesService implements OnModuleInit {
     for (const svc of this.services.values()) {
       if (!svc.domains || svc.domains.length === 0) continue;
       if (svc.status !== 'running') continue;
-      const target = `${svc.containerName}:${svc.internalPort || 3000}`;
+      // When Caddy runs as a system host daemon, it cannot resolve Docker container
+      // hostnames directly. Use the published host port (127.0.0.1:port) or the
+      // container's bridge IP address so reverse_proxy reaches the app reliably.
+      const target = svc.port
+        ? `127.0.0.1:${svc.port}`
+        : svc.containerIp
+          ? `${svc.containerIp}:${svc.internalPort || 3000}`
+          : `${svc.containerName}:${svc.internalPort || 3000}`;
       for (const host of svc.domains) {
         if (seen.has(host)) continue;
         seen.add(host);
