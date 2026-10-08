@@ -451,19 +451,34 @@ export class ServicesService implements OnModuleInit {
     const envArray = Object.entries(envVars).map(([k, v]) => `${k}=${v}`);
 
     try {
-      // Pull image if not already cached
+      // Pull image if not already cached, resolving any containerd / docker.io/library prefix variations
+      let targetImage = image;
       try {
-        await this.dockerService.client.getImage(image).inspect();
+        await this.dockerService.client.getImage(targetImage).inspect();
       } catch (inspectErr: any) {
-        if (image.startsWith('paas-app-')) {
+        if (targetImage.startsWith('paas-app-') || !targetImage.includes('/')) {
+          const libraryTag = `docker.io/library/${targetImage}`;
           try {
-            await this.dockerService.client.getImage(`docker.io/library/${image}`).inspect();
+            await this.dockerService.client.getImage(libraryTag).inspect();
+            targetImage = libraryTag;
           } catch {
-            console.warn(`[ServicesService] Local image "${image}" inspect notice: ${inspectErr?.message}`);
+            const fallbackLatest = `${targetImage.split(':')[0]}:latest`;
+            try {
+              await this.dockerService.client.getImage(fallbackLatest).inspect();
+              targetImage = fallbackLatest;
+            } catch {
+              try {
+                const libraryLatest = `docker.io/library/${fallbackLatest}`;
+                await this.dockerService.client.getImage(libraryLatest).inspect();
+                targetImage = libraryLatest;
+              } catch {
+                console.warn(`[ServicesService] Local image "${targetImage}" inspect notice: ${inspectErr?.message}`);
+              }
+            }
           }
         } else {
-          console.log(`[ServicesService] Pulling image: ${image}...`);
-          const pullStream = await this.dockerService.client.pull(image);
+          console.log(`[ServicesService] Pulling image: ${targetImage}...`);
+          const pullStream = await this.dockerService.client.pull(targetImage);
           await new Promise((resolve, reject) => {
             this.dockerService.client.modem.followProgress(pullStream, (err, res) => {
               if (err) reject(err);
@@ -484,8 +499,7 @@ export class ServicesService implements OnModuleInit {
 
       const portKey = `${exposedPort}/tcp`;
 
-      const container = await this.dockerService.client.createContainer({
-        Image: image,
+      const createOptions = {
         name: containerName,
         Env: envArray,
         Cmd: options.command,
@@ -513,7 +527,39 @@ export class ServicesService implements OnModuleInit {
           ...(options.systemPackages ? { 'paas.sys_packages': options.systemPackages } : {}),
           ...(options.nodeVersion ? { 'paas.node_version': options.nodeVersion } : {}),
         },
-      });
+      };
+
+      let container: any;
+      try {
+        container = await this.dockerService.client.createContainer({
+          ...createOptions,
+          Image: targetImage,
+        });
+      } catch (createErr: any) {
+        // Fallback for containerd image stores where names may be qualified with docker.io/library/ or vice-versa
+        const candidates = [
+          targetImage.startsWith('docker.io/library/')
+            ? targetImage.replace('docker.io/library/', '')
+            : `docker.io/library/${targetImage}`,
+          `${targetImage.split(':')[0]}:latest`,
+          `docker.io/library/${targetImage.split(':')[0]}:latest`,
+        ];
+        let fallbackCreated = false;
+        for (const candidate of candidates) {
+          try {
+            container = await this.dockerService.client.createContainer({
+              ...createOptions,
+              Image: candidate,
+            });
+            targetImage = candidate;
+            fallbackCreated = true;
+            break;
+          } catch {}
+        }
+        if (!fallbackCreated) {
+          throw createErr;
+        }
+      }
 
       await container.start();
 

@@ -2197,6 +2197,16 @@ export class GitHubService implements OnModuleInit {
         });
       }
 
+      // Ensure the newly built image is tagged under both short and fully-qualified names
+      // so Docker Engine / containerd resolves it under either identifier:
+      try {
+        await this.runProcess('docker', ['tag', `docker.io/library/${imageTag}`, imageTag], { timeoutMs: 5000 });
+      } catch {
+        try {
+          await this.runProcess('docker', ['tag', imageTag, `docker.io/library/${imageTag}`], { timeoutMs: 5000 });
+        } catch {}
+      }
+
       log(`[${new Date().toISOString()}] ✨ Image compilation successful (${imageTag}). Launching service container...\n`);
 
       this.setBuildPhase(session, 'deploying');
