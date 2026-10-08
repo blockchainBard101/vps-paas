@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { Eye, EyeOff, Server, Lock, ArrowRight, Check, AlertCircle, Loader2 } from 'lucide-react';
 import { PostgresLogo, RedisLogo } from '../icons/DatabaseLogos';
+import { getApiBase } from '@/lib/api';
 
 interface SetupScreenProps {
   onComplete: (token: string, user: any, instanceName: string) => void;
@@ -23,10 +24,7 @@ export function SetupScreen({ onComplete }: SetupScreenProps) {
     confirmPassword: '',
   });
 
-  const API_BASE =
-    typeof window !== 'undefined'
-      ? (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api')
-      : 'http://localhost:4000/api';
+  const API_BASE = getApiBase();
 
   const passwordStrength = (() => {
     const p = form.password;

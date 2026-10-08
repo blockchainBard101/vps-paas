@@ -1,6 +1,14 @@
-// apps/web/src/lib/api.ts
+export function getApiBase(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+  if (typeof window !== 'undefined' && window.location.hostname) {
+    return `${window.location.protocol}//${window.location.hostname}:4000/api`;
+  }
+  return 'http://localhost:4000/api';
+}
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api';
+const API_BASE = getApiBase();
 
 export interface S3BackupConfig {
   enabled: boolean;
@@ -1149,3 +1157,31 @@ export async function changePassword(dto: {
   }
   return res.json();
 }
+
+export interface SystemUpdateInfo {
+  currentCommit: string;
+  remoteCommit?: string;
+  branch: string;
+  isUpToDate: boolean;
+  pendingCount: number;
+  pendingCommits: Array<{ hash: string; message: string }>;
+  error?: string;
+}
+
+export async function checkSystemUpdates(): Promise<SystemUpdateInfo> {
+  const res = await fetch(`${API_BASE}/system/updates/check`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error('Failed to check for system updates');
+  return res.json();
+}
+
+export async function applySystemUpdate(): Promise<{ success: boolean; message: string }> {
+  const res = await fetch(`${API_BASE}/system/updates/apply`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error('Failed to initiate system update');
+  return res.json();
+}
+

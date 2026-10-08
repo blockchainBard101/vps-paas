@@ -5,6 +5,21 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execAsync = promisify(exec);
+
+function getRepoRoot(): string {
+  if (fs.existsSync(path.join(process.cwd(), 'ecosystem.config.cjs'))) {
+    return process.cwd();
+  }
+  const parent = path.resolve(process.cwd(), '../..');
+  if (fs.existsSync(path.join(parent, 'ecosystem.config.cjs'))) {
+    return parent;
+  }
+  return process.cwd();
+}
 
 export interface SystemSettingsData {
   domains: {
@@ -372,5 +387,84 @@ export class SystemSettingsService implements OnModuleInit {
     this.settings.apiAccess.tokens = this.settings.apiAccess.tokens.filter((t) => t.id !== id);
     this.saveToDisk();
     return { success: true };
+  }
+
+  async checkUpdates() {
+    const repoRoot = getRepoRoot();
+    try {
+      const { stdout: branchOut } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: repoRoot });
+      const branch = branchOut.trim() || 'main';
+
+      const { stdout: currentOut } = await execAsync('git rev-parse --short HEAD', { cwd: repoRoot });
+      const currentCommit = currentOut.trim();
+
+      try {
+        await execAsync(`git fetch origin ${branch}`, { cwd: repoRoot, timeout: 8000 });
+      } catch {
+        // Continue if fetch fails
+      }
+
+      let remoteCommit = currentCommit;
+      try {
+        const { stdout: remoteOut } = await execAsync(`git rev-parse --short origin/${branch}`, { cwd: repoRoot });
+        remoteCommit = remoteOut.trim();
+      } catch {
+        // Fallback
+      }
+
+      let pendingCommits: Array<{ hash: string; message: string }> = [];
+      try {
+        const { stdout: logOut } = await execAsync(`git log HEAD..origin/${branch} --oneline -n 15`, { cwd: repoRoot });
+        const pendingLines = logOut.trim().split('\n').filter(Boolean);
+        pendingCommits = pendingLines.map((line) => {
+          const [hash, ...rest] = line.split(' ');
+          return { hash, message: rest.join(' ') };
+        });
+      } catch {
+        // Fallback
+      }
+
+      return {
+        currentCommit,
+        remoteCommit,
+        branch,
+        isUpToDate: pendingCommits.length === 0,
+        pendingCount: pendingCommits.length,
+        pendingCommits,
+      };
+    } catch (err: any) {
+      return {
+        currentCommit: 'unknown',
+        remoteCommit: 'unknown',
+        branch: 'main',
+        isUpToDate: true,
+        pendingCount: 0,
+        pendingCommits: [],
+        error: err?.message || 'Failed to check git updates',
+      };
+    }
+  }
+
+  async applyUpdate() {
+    const repoRoot = getRepoRoot();
+    const updateScript = path.join(repoRoot, 'scripts/update.sh');
+    if (!fs.existsSync(updateScript)) {
+      throw new Error('Update script scripts/update.sh not found');
+    }
+
+    setTimeout(() => {
+      exec(`/bin/bash "${updateScript}"`, { cwd: repoRoot }, (error, stdout, stderr) => {
+        if (error) {
+          console.error('[PaaS Self-Update Error]', error, stderr);
+        } else {
+          console.log('[PaaS Self-Update Success]', stdout);
+        }
+      });
+    }, 500);
+
+    return {
+      success: true,
+      message: 'System update initiated. Services will compile and reload via PM2 shortly.',
+    };
   }
 }

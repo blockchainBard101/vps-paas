@@ -60,6 +60,9 @@ import {
   startCaddy,
   stopCaddy,
   verifyBaseDomain,
+  checkSystemUpdates,
+  applySystemUpdate,
+  SystemUpdateInfo,
   DomainStatus,
   GitHubStatus,
   SystemSettingsPayload,
@@ -124,10 +127,50 @@ export function SystemSettingsView({
   const [oauthClientSecret, setOauthClientSecret] = useState('');
   const [callbackUrl, setCallbackUrl] = useState('http://localhost:4000/api/github/oauth/callback');
 
+  // System updates state
+  const [updateInfo, setUpdateInfo] = useState<SystemUpdateInfo | null>(null);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [applyingUpdate, setApplyingUpdate] = useState(false);
+  const [updateSuccessMsg, setUpdateSuccessMsg] = useState<string | null>(null);
+
+  async function handleCheckUpdates() {
+    setCheckingUpdates(true);
+    setUpdateSuccessMsg(null);
+    try {
+      const info = await checkSystemUpdates();
+      setUpdateInfo(info);
+    } catch (err: any) {
+      console.error(err);
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }
+
+  async function handleApplyUpdate() {
+    if (!confirm('Apply updates and reload the platform? Services will compile and reload in the background.')) return;
+    setApplyingUpdate(true);
+    setUpdateSuccessMsg(null);
+    try {
+      const res = await applySystemUpdate();
+      setUpdateSuccessMsg(res.message);
+      setTimeout(() => handleCheckUpdates(), 8000);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to apply update');
+    } finally {
+      setApplyingUpdate(false);
+    }
+  }
+
   useEffect(() => {
     loadSettings();
     loadDomainStatus();
   }, []);
+
+  useEffect(() => {
+    if (activeTab === 'updates') {
+      handleCheckUpdates();
+    }
+  }, [activeTab]);
 
   // While on the Domains tab, quietly refresh the dashboard-domain status so it
   // flips to "verified" live — merging only the status fields so it never
@@ -1815,33 +1858,104 @@ export function SystemSettingsView({
             <div>
               <h2 className="text-xl font-bold tracking-tight text-zinc-100">Platform Releases & Updates</h2>
               <p className="text-xs text-zinc-400 mt-1">
-                Verify control plane version and apply latest container updates.
+                Keep your Railway + Neon PaaS platform updated with the latest upstream Git releases.
               </p>
             </div>
 
-            <div className="p-6 rounded-2xl border border-zinc-800 bg-zinc-900/30 space-y-4">
+            {updateSuccessMsg && (
+              <div className="p-4 rounded-xl bg-emerald-950/40 border border-emerald-800/60 text-xs text-emerald-300 flex items-center gap-3">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{updateSuccessMsg}</span>
+              </div>
+            )}
+
+            <div className="p-6 rounded-2xl border border-zinc-800 bg-zinc-900/30 space-y-5">
               <div className="flex items-center justify-between pb-4 border-b border-zinc-800">
                 <div>
                   <div className="text-sm font-semibold text-zinc-200">
-                    Control Plane: {settings.updates.currentVersion}
+                    Control Plane: <span className="font-mono text-xs bg-zinc-800 px-2 py-0.5 rounded text-zinc-300">{updateInfo?.currentCommit || 'HEAD'}</span>
                   </div>
-                  <div className="text-xs text-emerald-400 font-mono mt-0.5">
-                    ● You are running the latest stable release
+                  <div className="text-xs text-zinc-400 font-mono mt-1">
+                    Branch: <span className="text-cyan-400">{updateInfo?.branch || 'main'}</span>
+                    {updateInfo?.remoteCommit && (
+                      <span className="ml-3 text-zinc-500">
+                        Remote: <span className="text-zinc-300">{updateInfo.remoteCommit}</span>
+                      </span>
+                    )}
                   </div>
                 </div>
 
-                <button
-                  onClick={() => {
-                    alert('System verified: You are on the latest release v2.4.0-stable.');
-                  }}
-                  className="px-4 py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 rounded-xl text-xs font-semibold cursor-pointer"
-                >
-                  Check for Updates
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleCheckUpdates}
+                    disabled={checkingUpdates || applyingUpdate}
+                    className="flex items-center gap-2 px-4 py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 rounded-xl text-xs font-semibold cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${checkingUpdates ? 'animate-spin text-cyan-400' : ''}`} />
+                    {checkingUpdates ? 'Checking...' : 'Check for Updates'}
+                  </button>
+
+                  {updateInfo && !updateInfo.isUpToDate && updateInfo.pendingCount > 0 && (
+                    <button
+                      onClick={handleApplyUpdate}
+                      disabled={applyingUpdate}
+                      className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold cursor-pointer shadow-lg shadow-emerald-950/40 disabled:opacity-50"
+                    >
+                      {applyingUpdate ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Applying & Rebuilding...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>Update Platform Now ({updateInfo.pendingCount})</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <div className="text-xs font-mono text-zinc-400">
-                Release Channel: <strong className="text-zinc-200">Stable Release Channel</strong>
+              {/* Status indicator */}
+              <div>
+                {updateInfo?.isUpToDate ? (
+                  <div className="flex items-center gap-2 text-xs text-emerald-400 font-mono">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    <span>Your platform is running the latest version!</span>
+                  </div>
+                ) : updateInfo && updateInfo.pendingCount > 0 ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 text-xs text-amber-400 font-mono font-medium">
+                      <AlertCircle className="w-4 h-4 text-amber-400" />
+                      <span>{updateInfo.pendingCount} new commit{updateInfo.pendingCount > 1 ? 's' : ''} available on GitHub:</span>
+                    </div>
+
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 max-h-48 overflow-y-auto space-y-1.5 font-mono text-xs">
+                      {updateInfo.pendingCommits.map((c) => (
+                        <div key={c.hash} className="flex items-start gap-2 text-zinc-300 py-0.5">
+                          <span className="text-cyan-400 shrink-0 font-semibold">{c.hash}</span>
+                          <span className="truncate text-zinc-300">{c.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs text-zinc-400">
+                    Click &quot;Check for Updates&quot; to query remote GitHub repository.
+                  </div>
+                )}
+              </div>
+
+              {/* Terminal CLI command hint */}
+              <div className="pt-4 border-t border-zinc-800/80">
+                <div className="text-xs text-zinc-400 font-medium mb-1.5">
+                  Update via Terminal (SSH):
+                </div>
+                <div className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 font-mono text-xs text-zinc-300">
+                  <span>npm run update:prod</span>
+                  <span className="text-[10px] text-zinc-500">runs git pull &bull; npm build &bull; pm2 reload</span>
+                </div>
               </div>
             </div>
           </div>

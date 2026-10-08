@@ -12,6 +12,12 @@
     "build": "npm run build:server && npm run build:web",
     "build:web": "npm run build --workspace=web",
     "build:server": "npm run build --workspace=server",
+    "start:prod": "./scripts/start.sh",
+    "stop:prod": "./scripts/stop.sh",
+    "update:prod": "./scripts/update.sh",
+    "restart:prod": "pm2 restart ecosystem.config.cjs",
+    "status:prod": "pm2 status",
+    "logs:prod": "pm2 logs",
     "lint": "npm run lint --workspaces"
   },
   "optionalDependencies": {

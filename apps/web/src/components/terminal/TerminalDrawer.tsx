@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal as TerminalIcon, Minimize2, Trash2 } from 'lucide-react';
+import { getApiBase } from '@/lib/api';
 
 interface TerminalDrawerProps {
   serviceName: string;
@@ -62,7 +63,7 @@ export function TerminalDrawer({ serviceName, serviceId, isOpen, onClose, initia
     let eventSource: EventSource | null = null;
 
     if (serviceId && serviceId !== 'api-backend') {
-      const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api';
+      const apiBase = getApiBase();
       const streamUrl = activeTab === 'build'
         ? `${apiBase}/github/build-logs/stream/${encodeURIComponent(serviceId)}`
         : `${apiBase}/services/${encodeURIComponent(serviceId)}/logs/stream`;

@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { Eye, EyeOff, Server, Lock, AlertCircle, Loader2 } from 'lucide-react';
+import { getApiBase } from '@/lib/api';
 
 interface LoginScreenProps {
   instanceName: string;
@@ -14,10 +15,7 @@ export function LoginScreen({ instanceName, onSuccess }: LoginScreenProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [form, setForm] = useState({ email: '', password: '' });
 
-  const API_BASE =
-    typeof window !== 'undefined'
-      ? (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api')
-      : 'http://localhost:4000/api';
+  const API_BASE = getApiBase();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

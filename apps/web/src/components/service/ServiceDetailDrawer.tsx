@@ -47,6 +47,7 @@ import {
   verifyServiceDomains,
   fetchDomainStatus,
   ServiceRecord,
+  getApiBase,
 } from '@/lib/api';
 import { DeleteServiceModal } from './DeleteServiceModal';
 import { GitHubIcon } from '../github/GitHubRepoModal';
@@ -378,7 +379,7 @@ export function ServiceDetailDrawer({
     setStreamStatus('connecting');
     setLogs(`[PaaS LogStream] Connecting to live ${logSubTab === 'build' ? 'Build Compilation' : 'Runtime Container'} stream...\n------------------------------------------------------------\n`);
 
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api';
+    const apiBase = getApiBase();
     const streamUrl = logSubTab === 'build'
       ? `${apiBase}/github/build-logs/stream/${encodeURIComponent(service.id)}`
       : `${apiBase}/services/${encodeURIComponent(service.id)}/logs/stream`;

@@ -93,4 +93,14 @@ export class SystemSettingsController {
   revokeApiToken(@Param('id') id: string) {
     return this.settingsService.revokeApiToken(id);
   }
+
+  @Get('updates/check')
+  checkUpdates() {
+    return this.settingsService.checkUpdates();
+  }
+
+  @Post('updates/apply')
+  applyUpdate() {
+    return this.settingsService.applyUpdate();
+  }
 }
