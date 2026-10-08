@@ -302,6 +302,18 @@ export function RailwayCanvas({
                   };
                 }
 
+                if (sessionStatus === 'building' && nodeData.status === 'failed') {
+                  hasChanges = true;
+                  return {
+                    ...n,
+                    data: {
+                      ...nodeData,
+                      status: 'building',
+                      errorMessage: undefined,
+                    },
+                  };
+                }
+
                 const livePhase = info?.phase;
                 if (livePhase && nodeData.phase !== livePhase) {
                   hasChanges = true;

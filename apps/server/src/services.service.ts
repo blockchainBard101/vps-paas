@@ -350,15 +350,23 @@ export class ServicesService implements OnModuleInit {
       // Pull image if not already cached
       try {
         await this.dockerService.client.getImage(image).inspect();
-      } catch {
-        console.log(`[ServicesService] Pulling image: ${image}...`);
-        const pullStream = await this.dockerService.client.pull(image);
-        await new Promise((resolve, reject) => {
-          this.dockerService.client.modem.followProgress(pullStream, (err, res) => {
-            if (err) reject(err);
-            else resolve(res);
+      } catch (inspectErr: any) {
+        if (image.startsWith('paas-app-')) {
+          try {
+            await this.dockerService.client.getImage(`docker.io/library/${image}`).inspect();
+          } catch {
+            console.warn(`[ServicesService] Local image "${image}" inspect notice: ${inspectErr?.message}`);
+          }
+        } else {
+          console.log(`[ServicesService] Pulling image: ${image}...`);
+          const pullStream = await this.dockerService.client.pull(image);
+          await new Promise((resolve, reject) => {
+            this.dockerService.client.modem.followProgress(pullStream, (err, res) => {
+              if (err) reject(err);
+              else resolve(res);
+            });
           });
-        });
+        }
       }
 
       await this.dockerService.ensureInternalNetwork();

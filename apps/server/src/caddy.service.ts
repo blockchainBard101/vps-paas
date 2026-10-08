@@ -63,11 +63,33 @@ export class CaddyService implements OnModuleInit {
 
   /** Build a full Caddy JSON config from the host→target routes. */
   renderConfig(routes: CaddyRoute[]) {
-    const httpRoutes = routes.map((r) => ({
-      match: [{ host: [r.host] }],
-      handle: [{ handler: 'reverse_proxy', upstreams: [{ dial: r.target }] }],
-      terminal: true,
-    }));
+    const httpRoutes = routes.map((r) => {
+      if (r.target === 'localhost:3000') {
+        return {
+          match: [{ host: [r.host] }],
+          handle: [
+            {
+              handler: 'subroute',
+              routes: [
+                {
+                  match: [{ path: ['/api/*'] }],
+                  handle: [{ handler: 'reverse_proxy', upstreams: [{ dial: 'localhost:4000' }] }],
+                },
+                {
+                  handle: [{ handler: 'reverse_proxy', upstreams: [{ dial: r.target }] }],
+                },
+              ],
+            },
+          ],
+          terminal: true,
+        };
+      }
+      return {
+        match: [{ host: [r.host] }],
+        handle: [{ handler: 'reverse_proxy', upstreams: [{ dial: r.target }] }],
+        terminal: true,
+      };
+    });
     return {
       // Keep the admin API reachable from the host across config reloads.
       admin: { listen: CADDY_ADMIN_LISTEN, origins: CADDY_ADMIN_ORIGINS },
@@ -98,7 +120,21 @@ export class CaddyService implements OnModuleInit {
       '',
     ];
     for (const r of routes) {
-      lines.push(`${r.host} {`, `\treverse_proxy ${r.target}`, '}', '');
+      if (r.target === 'localhost:3000') {
+        lines.push(
+          `${r.host} {`,
+          `\thandle /api/* {`,
+          `\t\treverse_proxy localhost:4000`,
+          `\t}`,
+          `\thandle {`,
+          `\t\treverse_proxy ${r.target}`,
+          `\t}`,
+          `}`,
+          ''
+        );
+      } else {
+        lines.push(`${r.host} {`, `\treverse_proxy ${r.target}`, '}', '');
+      }
     }
     if (routes.length === 0) {
       // A Caddyfile with no site blocks makes `caddy run` exit immediately, so
