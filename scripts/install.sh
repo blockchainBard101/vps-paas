@@ -106,7 +106,11 @@ install_caddy() {
 install_node_and_pm2() {
   if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -d'.' -f1 | tr -d 'v')" -lt 20 ]; then
     say "Installing Node.js 20 LTS via NodeSource..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | $SUDO -E bash -
+    if [ -n "$SUDO" ]; then
+      curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    else
+      curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    fi
     $SUDO apt-get install -y nodejs
     success "Node.js $(node -v) installed."
   else
@@ -145,6 +149,15 @@ check_port_conflicts() {
       fi
     fi
   done
+
+  # If port 3000 is occupied, auto-fallback WEB_PORT to 3005 so it doesn't collide
+  if command -v ss >/dev/null 2>&1 && ss -tuln 2>/dev/null | grep -q ":3000 "; then
+    if [ "$WEB_PORT" = "3000" ]; then
+      say "Port 3000 is in use by your existing app. Automatically using port 3005 for PaaS Dashboard."
+      WEB_PORT="3005"
+      export PAAS_WEB_PORT="3005"
+    fi
+  fi
 }
 
 configure_firewall() {
