@@ -91,6 +91,8 @@ export class AuthService implements OnModuleInit {
     }
   }
 
+  private loginAttempts = new Map<string, { count: number; resetAt: number }>();
+
   private loadFromDisk() {
     try {
       if (fs.existsSync(this.storagePath)) {
@@ -116,12 +118,42 @@ export class AuthService implements OnModuleInit {
     try {
       const dir = path.dirname(this.storagePath);
       if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       }
-      fs.writeFileSync(this.storagePath, JSON.stringify(this.data, null, 2), 'utf8');
+      fs.writeFileSync(this.storagePath, JSON.stringify(this.data, null, 2), {
+        encoding: 'utf8',
+        mode: 0o600, // Restrictive permissions: read/write only by file owner
+      });
+      try {
+        fs.chmodSync(this.storagePath, 0o600);
+      } catch {}
     } catch (err) {
       console.error('Failed to save auth config to disk:', err);
     }
+  }
+
+  private checkRateLimit(key: string, maxAttempts = 5, windowMs = 60000) {
+    const now = Date.now();
+    const bucket = this.loginAttempts.get(key);
+    if (bucket) {
+      if (now < bucket.resetAt) {
+        if (bucket.count >= maxAttempts) {
+          const remainingSec = Math.ceil((bucket.resetAt - now) / 1000);
+          throw new BadRequestException(
+            `Too many failed attempts. Rate limit exceeded. Please wait ${remainingSec} seconds before trying again.`
+          );
+        }
+        bucket.count++;
+      } else {
+        this.loginAttempts.set(key, { count: 1, resetAt: now + windowMs });
+      }
+    } else {
+      this.loginAttempts.set(key, { count: 1, resetAt: now + windowMs });
+    }
+  }
+
+  private clearRateLimit(key: string) {
+    this.loginAttempts.delete(key);
   }
 
   private hashPassword(password: string, salt: string): string {
@@ -221,6 +253,9 @@ export class AuthService implements OnModuleInit {
     const email = dto.email.trim().toLowerCase();
     const password = dto.password;
 
+    // Throttle login attempts to defend against brute force
+    this.checkRateLimit(`login:${email}`);
+
     // Check primary admin
     if (email === this.data.admin.email.toLowerCase()) {
       const computedHash = this.hashPassword(password, this.data.admin.salt);
@@ -231,6 +266,7 @@ export class AuthService implements OnModuleInit {
         throw new UnauthorizedException('Invalid email or password.');
       }
 
+      this.clearRateLimit(`login:${email}`);
       this.data.admin.lastLoginAt = new Date().toISOString();
       const token = this.createSession(this.data.admin.id);
       this.saveToDisk();
@@ -267,6 +303,7 @@ export class AuthService implements OnModuleInit {
         throw new UnauthorizedException('Invalid email or password.');
       }
 
+      this.clearRateLimit(`login:${email}`);
       member.lastLoginAt = new Date().toISOString();
       const token = this.createSession(member.id);
       this.saveToDisk();
@@ -572,6 +609,8 @@ export class AuthService implements OnModuleInit {
 
   acceptInvite(dto: { token: string; password: string; name?: string }) {
     if (!dto.token) throw new BadRequestException('Invalid invitation token.');
+    this.checkRateLimit(`invite:${dto.token}`);
+
     const member = this.data.members.find((m) => m.inviteToken === dto.token);
     if (!member) {
       throw new BadRequestException('Invitation link is invalid or has expired.');

@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { DockerService } from './docker.service.js';
@@ -15,6 +16,7 @@ import { SystemSettingsController } from './system-settings.controller.js';
 import { AuthService } from './auth.service.js';
 import { AuthController } from './auth.controller.js';
 import { CaddyService } from './caddy.service.js';
+import { AuthGuard } from './auth.guard.js';
 
 @Module({
   imports: [],
@@ -37,6 +39,11 @@ import { CaddyService } from './caddy.service.js';
     ProjectsService,
     SystemSettingsService,
     CaddyService,
+    {
+      provide: APP_GUARD,
+      useClass: AuthGuard,
+    },
   ],
 })
 export class AppModule {}
+

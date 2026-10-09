@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { GitHubService } from './github.service.js';
+import { Public } from './public.decorator.js';
 
 @Controller('api/github')
 export class GitHubController {
@@ -32,6 +33,7 @@ export class GitHubController {
     return this.githubService.getOAuthUrl(redirectUri);
   }
 
+  @Public()
   @Get('manifest/start')
   startManifestFlow(@Res() res: Response) {
     const data = this.githubService.getManifestData();
@@ -143,6 +145,7 @@ export class GitHubController {
     `);
   }
 
+  @Public()
   @Get('manifest/callback')
   async handleManifestCallback(@Query('code') code: string, @Res() res: Response) {
     try {
@@ -173,6 +176,7 @@ export class GitHubController {
     }
   }
 
+  @Public()
   @Get('oauth/callback')
   async handleOAuthCallback(@Query('code') code: string, @Res() res: Response) {
     try {
@@ -425,6 +429,7 @@ export class GitHubController {
     return this.githubService.redeployService(serviceId, body);
   }
 
+  @Public()
   @Post('webhook')
   @HttpCode(200)
   handleWebhook(

@@ -10,6 +10,43 @@ export function getApiBase(): string {
 
 const API_BASE = getApiBase();
 
+// ─── Authenticated Fetch & Session Helpers ─────────────────────────────────────
+const TOKEN_KEY = 'paas_auth_token';
+
+export function getAuthToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setAuthToken(token: string) {
+  if (typeof window !== 'undefined') localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearAuthToken() {
+  if (typeof window !== 'undefined') localStorage.removeItem(TOKEN_KEY);
+}
+
+export function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const token = getAuthToken();
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...extra,
+  };
+}
+
+export async function authFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  const token = getAuthToken();
+  const headers = new Headers(init?.headers || {});
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return fetch(input, {
+    ...init,
+    headers,
+  });
+}
+
 export interface S3BackupConfig {
   enabled: boolean;
   endpoint: string;
@@ -70,13 +107,13 @@ export interface TableSummary {
 }
 
 export async function fetchDatabases(): Promise<DatabaseRecord[]> {
-  const res = await fetch(`${API_BASE}/databases`);
+  const res = await authFetch(`${API_BASE}/databases`);
   if (!res.ok) throw new Error('Failed to fetch databases');
   return res.json();
 }
 
 export async function provisionDatabase(name: string, dbName = 'railway'): Promise<DatabaseRecord> {
-  const res = await fetch(`${API_BASE}/databases/provision`, {
+  const res = await authFetch(`${API_BASE}/databases/provision`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, dbName }),
@@ -89,7 +126,7 @@ export async function provisionDatabase(name: string, dbName = 'railway'): Promi
 }
 
 export async function provisionRedis(name = 'production-redis'): Promise<DatabaseRecord> {
-  const res = await fetch(`${API_BASE}/databases/provision-redis`, {
+  const res = await authFetch(`${API_BASE}/databases/provision-redis`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -102,25 +139,25 @@ export async function provisionRedis(name = 'production-redis'): Promise<Databas
 }
 
 export async function startDatabase(id: string): Promise<DatabaseRecord> {
-  const res = await fetch(`${API_BASE}/databases/${id}/start`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/databases/${id}/start`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to start database');
   return res.json();
 }
 
 export async function stopDatabase(id: string): Promise<DatabaseRecord> {
-  const res = await fetch(`${API_BASE}/databases/${id}/stop`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/databases/${id}/stop`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to stop database');
   return res.json();
 }
 
 export async function restartDatabase(id: string): Promise<DatabaseRecord> {
-  const res = await fetch(`${API_BASE}/databases/${id}/restart`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/databases/${id}/restart`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to restart database');
   return res.json();
 }
 
 export async function fetchDatabaseHealth(id: string): Promise<{ status: 'healthy' | 'unhealthy' | 'stopped'; latencyMs?: number; error?: string }> {
-  const res = await fetch(`${API_BASE}/databases/${id}/health`);
+  const res = await authFetch(`${API_BASE}/databases/${id}/health`);
   if (!res.ok) throw new Error('Failed to fetch database health');
   return res.json();
 }
@@ -130,7 +167,7 @@ export function getDatabaseBackupDownloadUrl(databaseId: string, backupId: strin
 }
 
 export async function fetchDatabaseBackupConfig(databaseId: string): Promise<S3BackupConfig> {
-  const res = await fetch(`${API_BASE}/databases/${databaseId}/backup/config`);
+  const res = await authFetch(`${API_BASE}/databases/${databaseId}/backup/config`);
   if (!res.ok) throw new Error('Failed to fetch S3 backup configuration');
   return res.json();
 }
@@ -139,7 +176,7 @@ export async function updateDatabaseBackupConfig(
   databaseId: string,
   partial: Partial<S3BackupConfig>
 ): Promise<S3BackupConfig> {
-  const res = await fetch(`${API_BASE}/databases/${databaseId}/backup/config`, {
+  const res = await authFetch(`${API_BASE}/databases/${databaseId}/backup/config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(partial),
@@ -152,7 +189,7 @@ export async function testDatabaseBackupS3(
   databaseId: string,
   partial?: Partial<S3BackupConfig>
 ): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/databases/${databaseId}/backup/test`, {
+  const res = await authFetch(`${API_BASE}/databases/${databaseId}/backup/test`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(partial || {}),
@@ -165,13 +202,13 @@ export async function testDatabaseBackupS3(
 }
 
 export async function fetchDatabaseBackups(databaseId: string): Promise<BackupSnapshot[]> {
-  const res = await fetch(`${API_BASE}/databases/${databaseId}/backups`);
+  const res = await authFetch(`${API_BASE}/databases/${databaseId}/backups`);
   if (!res.ok) throw new Error('Failed to fetch backup snapshots');
   return res.json();
 }
 
 export async function triggerDatabaseBackup(databaseId: string): Promise<BackupSnapshot> {
-  const res = await fetch(`${API_BASE}/databases/${databaseId}/backup`, {
+  const res = await authFetch(`${API_BASE}/databases/${databaseId}/backup`, {
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to trigger database backup to S3');
@@ -182,7 +219,7 @@ export async function restoreDatabaseBackup(
   databaseId: string,
   backupId: string
 ): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/databases/${databaseId}/restore/${backupId}`, {
+  const res = await authFetch(`${API_BASE}/databases/${databaseId}/restore/${backupId}`, {
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to restore database from backup');
@@ -197,7 +234,7 @@ export interface ContainerMetrics {
 }
 
 export async function fetchDatabaseMetrics(databaseId: string): Promise<ContainerMetrics> {
-  const res = await fetch(`${API_BASE}/databases/${databaseId}/metrics`);
+  const res = await authFetch(`${API_BASE}/databases/${databaseId}/metrics`);
   if (!res.ok) throw new Error('Failed to fetch database metrics');
   return res.json();
 }
@@ -206,7 +243,7 @@ export async function deleteDatabaseBackup(
   databaseId: string,
   backupId: string
 ): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/databases/${databaseId}/backups/${backupId}`, {
+  const res = await authFetch(`${API_BASE}/databases/${databaseId}/backups/${backupId}`, {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error('Failed to delete backup snapshot');
@@ -214,7 +251,7 @@ export async function deleteDatabaseBackup(
 }
 
 export async function deleteDatabase(serviceId: string): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/databases/${serviceId}`, {
+  const res = await authFetch(`${API_BASE}/databases/${serviceId}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -225,7 +262,7 @@ export async function deleteDatabase(serviceId: string): Promise<{ success: bool
 }
 
 export async function introspectDatabase(serviceId: string): Promise<TableSummary[]> {
-  const res = await fetch(`${API_BASE}/databases/${serviceId}/introspect`);
+  const res = await authFetch(`${API_BASE}/databases/${serviceId}/introspect`);
   if (!res.ok) throw new Error('Failed to introspect database schema');
   return res.json();
 }
@@ -243,7 +280,7 @@ export async function fetchTableData(
     page: String(page),
     pageSize: String(pageSize),
   });
-  const res = await fetch(`${API_BASE}/databases/${serviceId}/data?${params}`);
+  const res = await authFetch(`${API_BASE}/databases/${serviceId}/data?${params}`);
   if (!res.ok) throw new Error('Failed to fetch table data');
   return res.json();
 }
@@ -257,7 +294,7 @@ export async function updateTableCell(
   column: string,
   newValue: any
 ): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/databases/${serviceId}/cell`, {
+  const res = await authFetch(`${API_BASE}/databases/${serviceId}/cell`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -278,7 +315,7 @@ export async function executeSqlQuery(
   sql: string,
   readOnly = false
 ): Promise<{ rows: any[]; rowCount: number; durationMs: number; error?: string }> {
-  const res = await fetch(`${API_BASE}/databases/${serviceId}/query`, {
+  const res = await authFetch(`${API_BASE}/databases/${serviceId}/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sql, readOnly }),
@@ -293,7 +330,7 @@ export async function insertTableRow(
   rowData: Record<string, any>,
   schema = 'public'
 ): Promise<any> {
-  const res = await fetch(`${API_BASE}/databases/${serviceId}/row`, {
+  const res = await authFetch(`${API_BASE}/databases/${serviceId}/row`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ schema, table, rowData }),
@@ -305,7 +342,7 @@ export async function insertTableRow(
 export async function createDatabaseBackup(
   serviceId: string
 ): Promise<BackupSnapshot> {
-  const res = await fetch(`${API_BASE}/databases/${serviceId}/backup`, {
+  const res = await authFetch(`${API_BASE}/databases/${serviceId}/backup`, {
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to create database backup');
@@ -368,7 +405,7 @@ export interface ServiceRecord {
 }
 
 export async function fetchServices(): Promise<ServiceRecord[]> {
-  const res = await fetch(`${API_BASE}/services`);
+  const res = await authFetch(`${API_BASE}/services`);
   if (!res.ok) throw new Error('Failed to fetch services');
   return res.json();
 }
@@ -379,7 +416,7 @@ export async function deployService(
   port = 80,
   env: Record<string, string> = {}
 ): Promise<ServiceRecord> {
-  const res = await fetch(`${API_BASE}/services`, {
+  const res = await authFetch(`${API_BASE}/services`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, image, port, env }),
@@ -392,25 +429,25 @@ export async function deployService(
 }
 
 export async function restartService(id: string): Promise<ServiceRecord> {
-  const res = await fetch(`${API_BASE}/services/${id}/restart`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/services/${id}/restart`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to restart service');
   return res.json();
 }
 
 export async function stopService(id: string): Promise<ServiceRecord> {
-  const res = await fetch(`${API_BASE}/services/${id}/stop`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/services/${id}/stop`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to stop service');
   return res.json();
 }
 
 export async function deleteService(id: string): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/services/${id}`, { method: 'DELETE' });
+  const res = await authFetch(`${API_BASE}/services/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error('Failed to delete service');
   return res.json();
 }
 
 export async function fetchServiceLogs(id: string, tail = 100): Promise<{ logs: string }> {
-  const res = await fetch(`${API_BASE}/services/${id}/logs?tail=${tail}`);
+  const res = await authFetch(`${API_BASE}/services/${id}/logs?tail=${tail}`);
   if (!res.ok) throw new Error('Failed to fetch service logs');
   return res.json();
 }
@@ -419,7 +456,7 @@ export async function updateServiceEnv(
   id: string,
   env: Record<string, string>
 ): Promise<ServiceRecord> {
-  const res = await fetch(`${API_BASE}/services/${id}/env`, {
+  const res = await authFetch(`${API_BASE}/services/${id}/env`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ env }),
@@ -471,7 +508,7 @@ export interface GitHubStatus {
 }
 
 export async function fetchGitHubStatus(): Promise<GitHubStatus> {
-  const res = await fetch(`${API_BASE}/github/status`);
+  const res = await authFetch(`${API_BASE}/github/status`);
   if (!res.ok) throw new Error('Failed to fetch GitHub status');
   return res.json();
 }
@@ -485,13 +522,13 @@ export async function fetchGitHubOAuthUrl(redirectUri?: string): Promise<{
   postUrl?: string;
 }> {
   const query = redirectUri ? `?redirectUri=${encodeURIComponent(redirectUri)}` : '';
-  const res = await fetch(`${API_BASE}/github/oauth/authorize${query}`);
+  const res = await authFetch(`${API_BASE}/github/oauth/authorize${query}`);
   if (!res.ok) throw new Error('Failed to get GitHub authorization URL');
   return res.json();
 }
 
 export async function saveGitHubOAuthConfig(clientId: string, clientSecret: string): Promise<GitHubStatus> {
-  const res = await fetch(`${API_BASE}/github/oauth/config`, {
+  const res = await authFetch(`${API_BASE}/github/oauth/config`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ clientId, clientSecret }),
@@ -504,7 +541,7 @@ export async function saveGitHubOAuthConfig(clientId: string, clientSecret: stri
 }
 
 export async function saveGitHubToken(token: string): Promise<GitHubStatus> {
-  const res = await fetch(`${API_BASE}/github/token`, {
+  const res = await authFetch(`${API_BASE}/github/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token }),
@@ -517,7 +554,7 @@ export async function saveGitHubToken(token: string): Promise<GitHubStatus> {
 }
 
 export async function disconnectGitHub(): Promise<GitHubStatus> {
-  const res = await fetch(`${API_BASE}/github/disconnect`, {
+  const res = await authFetch(`${API_BASE}/github/disconnect`, {
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to disconnect GitHub account');
@@ -525,7 +562,7 @@ export async function disconnectGitHub(): Promise<GitHubStatus> {
 }
 
 export async function resetGitHubAppConfig(): Promise<GitHubStatus> {
-  const res = await fetch(`${API_BASE}/github/oauth/config`, {
+  const res = await authFetch(`${API_BASE}/github/oauth/config`, {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error('Failed to reset GitHub App configuration');
@@ -533,13 +570,13 @@ export async function resetGitHubAppConfig(): Promise<GitHubStatus> {
 }
 
 export async function fetchGitHubRepos(): Promise<GitHubRepo[]> {
-  const res = await fetch(`${API_BASE}/github/repos`);
+  const res = await authFetch(`${API_BASE}/github/repos`);
   if (!res.ok) throw new Error('Failed to fetch GitHub repositories');
   return res.json();
 }
 
 export async function fetchPublicGitHubRepo(owner: string, repo: string): Promise<GitHubRepo> {
-  const res = await fetch(`${API_BASE}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+  const res = await authFetch(`${API_BASE}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
   if (!res.ok) {
     const err = await res.text();
     throw new Error(`Repository not found: ${err}`);
@@ -548,7 +585,7 @@ export async function fetchPublicGitHubRepo(owner: string, repo: string): Promis
 }
 
 export async function fetchGitHubBranches(owner: string, repo: string): Promise<string[]> {
-  const res = await fetch(`${API_BASE}/github/repos/${owner}/${repo}/branches`);
+  const res = await authFetch(`${API_BASE}/github/repos/${owner}/${repo}/branches`);
   if (!res.ok) throw new Error('Failed to fetch branches');
   return res.json();
 }
@@ -583,7 +620,7 @@ export async function detectGitHubRepoBuild(
     if (subfolder && subfolder !== '.') params.set('subfolder', subfolder);
     if (dockerfilePath) params.set('dockerfilePath', dockerfilePath);
     const qs = params.toString() ? `?${params.toString()}` : '';
-    const res = await fetch(`${API_BASE}/github/repos/${owner}/${repo}/detect${qs}`);
+    const res = await authFetch(`${API_BASE}/github/repos/${owner}/${repo}/detect${qs}`);
     if (!res.ok) {
       return {
         hasDockerfile: false,
@@ -623,7 +660,7 @@ export async function fetchEnvSuggestions(
     if (branch) params.set('branch', branch);
     if (subfolder && subfolder !== '.') params.set('subfolder', subfolder);
     const qs = params.toString() ? `?${params.toString()}` : '';
-    const res = await fetch(`${API_BASE}/github/repos/${owner}/${repo}/env-suggestions${qs}`);
+    const res = await authFetch(`${API_BASE}/github/repos/${owner}/${repo}/env-suggestions${qs}`);
     if (!res.ok) return [];
     return res.json();
   } catch {
@@ -649,7 +686,7 @@ export async function deployGitHubRepo(
   nodeVersion?: string,
   serviceName?: string
 ): Promise<{ service: ServiceRecord; git: any }> {
-  const res = await fetch(`${API_BASE}/github/deploy`, {
+  const res = await authFetch(`${API_BASE}/github/deploy`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -679,13 +716,13 @@ export async function deployGitHubRepo(
 }
 
 export async function fetchBuildLogs(id: string): Promise<{ logs: string[]; status: string; phase?: string }> {
-  const res = await fetch(`${API_BASE}/github/build-logs/${encodeURIComponent(id)}`);
+  const res = await authFetch(`${API_BASE}/github/build-logs/${encodeURIComponent(id)}`);
   if (!res.ok) return { logs: [], status: 'not_found' };
   return res.json();
 }
 
 export async function fetchBuildStatus(id: string): Promise<{ status: string; phase?: string }> {
-  const res = await fetch(`${API_BASE}/github/build-status/${encodeURIComponent(id)}`);
+  const res = await authFetch(`${API_BASE}/github/build-status/${encodeURIComponent(id)}`);
   if (!res.ok) return { status: 'not_found' };
   return res.json();
 }
@@ -694,7 +731,7 @@ export async function updateServiceSettings(
   id: string,
   settings: ServiceSettingsUpdate
 ): Promise<ServiceRecord> {
-  const res = await fetch(`${API_BASE}/services/${id}/settings`, {
+  const res = await authFetch(`${API_BASE}/services/${id}/settings`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings),
@@ -707,7 +744,7 @@ export async function updateServiceSettings(
 }
 
 export async function addServiceDomain(id: string, domain: string): Promise<ServiceRecord> {
-  const res = await fetch(`${API_BASE}/services/${id}/domains`, {
+  const res = await authFetch(`${API_BASE}/services/${id}/domains`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ domain }),
@@ -720,7 +757,7 @@ export async function addServiceDomain(id: string, domain: string): Promise<Serv
 }
 
 export async function removeServiceDomain(id: string, domain: string): Promise<ServiceRecord> {
-  const res = await fetch(`${API_BASE}/services/${id}/domains`, {
+  const res = await authFetch(`${API_BASE}/services/${id}/domains`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ domain }),
@@ -733,13 +770,13 @@ export async function removeServiceDomain(id: string, domain: string): Promise<S
 }
 
 export async function verifyServiceDomains(id: string): Promise<ServiceRecord> {
-  const res = await fetch(`${API_BASE}/services/${id}/domains/verify`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/services/${id}/domains/verify`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to verify domains');
   return res.json();
 }
 
 export async function verifyAllDomains(): Promise<{ verified: number; pending: number; checked: number }> {
-  const res = await fetch(`${API_BASE}/system/domains/verify-all`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/system/domains/verify-all`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to verify domains');
   return res.json();
 }
@@ -747,7 +784,7 @@ export async function verifyAllDomains(): Promise<{ verified: number; pending: n
 export async function verifyHost(
   host: string
 ): Promise<{ host: string; targetIp: string; ips: string[]; verified: boolean }> {
-  const res = await fetch(`${API_BASE}/system/domains/verify-host`, {
+  const res = await authFetch(`${API_BASE}/system/domains/verify-host`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ host }),
@@ -762,7 +799,7 @@ export async function verifyBaseDomain(): Promise<{
   ips: string[];
   verified: boolean;
 }> {
-  const res = await fetch(`${API_BASE}/system/domains/verify-base`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/system/domains/verify-base`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to verify domain');
   return res.json();
 }
@@ -779,25 +816,25 @@ export interface DomainStatus {
 }
 
 export async function fetchDomainStatus(): Promise<DomainStatus> {
-  const res = await fetch(`${API_BASE}/system/domains/status`);
+  const res = await authFetch(`${API_BASE}/system/domains/status`);
   if (!res.ok) throw new Error('Failed to fetch domain status');
   return res.json();
 }
 
 export async function syncDomains(): Promise<{ applied: boolean; error?: string; routes: Array<{ host: string; target: string }> }> {
-  const res = await fetch(`${API_BASE}/system/domains/sync`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/system/domains/sync`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to sync domains');
   return res.json();
 }
 
 export async function startCaddy(): Promise<{ running: boolean; started: boolean; ready: boolean; applied: boolean; error?: string }> {
-  const res = await fetch(`${API_BASE}/system/caddy/start`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/system/caddy/start`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to start Caddy');
   return res.json();
 }
 
 export async function stopCaddy(): Promise<{ stopped: boolean; error?: string }> {
-  const res = await fetch(`${API_BASE}/system/caddy/stop`, { method: 'POST' });
+  const res = await authFetch(`${API_BASE}/system/caddy/stop`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to stop Caddy');
   return res.json();
 }
@@ -811,7 +848,7 @@ export async function fetchDeployHistory(serviceId: string): Promise<Array<{
   repoName: string;
   logsCount: number;
 }>> {
-  const res = await fetch(`${API_BASE}/github/deployments/history/${encodeURIComponent(serviceId)}`);
+  const res = await authFetch(`${API_BASE}/github/deployments/history/${encodeURIComponent(serviceId)}`);
   if (!res.ok) return [];
   return res.json();
 }
@@ -820,7 +857,7 @@ export async function redeployGitHubService(
   id: string,
   overrides?: ServiceSettingsUpdate
 ): Promise<{ service: ServiceRecord; git: any }> {
-  const res = await fetch(`${API_BASE}/github/redeploy/${id}`, {
+  const res = await authFetch(`${API_BASE}/github/redeploy/${id}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(overrides || {}),
@@ -852,13 +889,13 @@ export interface ProjectRecord {
 }
 
 export async function fetchProjects(): Promise<ProjectRecord[]> {
-  const res = await fetch(`${API_BASE}/projects`);
+  const res = await authFetch(`${API_BASE}/projects`);
   if (!res.ok) throw new Error('Failed to fetch projects');
   return res.json();
 }
 
 export async function fetchProject(id: string): Promise<ProjectRecord> {
-  const res = await fetch(`${API_BASE}/projects/${id}`);
+  const res = await authFetch(`${API_BASE}/projects/${id}`);
   if (!res.ok) throw new Error(`Failed to fetch project ${id}`);
   return res.json();
 }
@@ -868,7 +905,7 @@ export async function createProject(
   description?: string,
   environment = 'production'
 ): Promise<ProjectRecord> {
-  const res = await fetch(`${API_BASE}/projects`, {
+  const res = await authFetch(`${API_BASE}/projects`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, description, environment }),
@@ -885,7 +922,7 @@ export async function saveProjectCanvas(
   nodes: any[],
   edges: any[]
 ): Promise<ProjectRecord> {
-  const res = await fetch(`${API_BASE}/projects/${id}/canvas`, {
+  const res = await authFetch(`${API_BASE}/projects/${id}/canvas`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ nodes, edges }),
@@ -898,7 +935,7 @@ export async function saveProjectCanvas(
 }
 
 export async function deleteProject(id: string): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/projects/${id}`, {
+  const res = await authFetch(`${API_BASE}/projects/${id}`, {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error('Failed to delete project');
@@ -998,7 +1035,7 @@ export interface SystemSettingsPayload {
 }
 
 export async function fetchSystemSettings(): Promise<SystemSettingsPayload> {
-  const res = await fetch(`${API_BASE}/system/settings`);
+  const res = await authFetch(`${API_BASE}/system/settings`);
   if (!res.ok) throw new Error('Failed to fetch system settings');
   return res.json();
 }
@@ -1006,7 +1043,7 @@ export async function fetchSystemSettings(): Promise<SystemSettingsPayload> {
 export async function updateSystemSettings(
   partial: Partial<SystemSettingsPayload>
 ): Promise<SystemSettingsPayload> {
-  const res = await fetch(`${API_BASE}/system/settings`, {
+  const res = await authFetch(`${API_BASE}/system/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(partial),
@@ -1016,7 +1053,7 @@ export async function updateSystemSettings(
 }
 
 export async function runDockerPrune(): Promise<{ spaceReclaimed: string; success: boolean }> {
-  const res = await fetch(`${API_BASE}/system/prune`, {
+  const res = await authFetch(`${API_BASE}/system/prune`, {
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to prune Docker');
@@ -1027,7 +1064,7 @@ export async function createSystemApiToken(
   name: string,
   role: 'admin' | 'deploy' | 'readonly' = 'deploy'
 ): Promise<{ tokenRecord: any; rawSecret: string }> {
-  const res = await fetch(`${API_BASE}/system/tokens`, {
+  const res = await authFetch(`${API_BASE}/system/tokens`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, role }),
@@ -1037,33 +1074,14 @@ export async function createSystemApiToken(
 }
 
 export async function revokeSystemApiToken(id: string): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/system/tokens/${id}`, {
+  const res = await authFetch(`${API_BASE}/system/tokens/${id}`, {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error('Failed to revoke API token');
   return res.json();
 }
 
-// ─── Auth token helper ────────────────────────────────────────────────────────
-const TOKEN_KEY = 'paas_auth_token';
-export function getAuthToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  return localStorage.getItem(TOKEN_KEY);
-}
-export function setAuthToken(token: string) {
-  if (typeof window !== 'undefined') localStorage.setItem(TOKEN_KEY, token);
-}
-export function clearAuthToken() {
-  if (typeof window !== 'undefined') localStorage.removeItem(TOKEN_KEY);
-}
-
-function authHeaders(): Record<string, string> {
-  const token = getAuthToken();
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
-}
+// (Auth helpers moved to top of file)
 
 // ─── Auth endpoints ───────────────────────────────────────────────────────────
 export interface AuthStatus {
@@ -1089,7 +1107,7 @@ export interface AuthSession {
 }
 
 export async function fetchAuthStatus(): Promise<AuthStatus> {
-  const res = await fetch(`${API_BASE}/auth/status`);
+  const res = await authFetch(`${API_BASE}/auth/status`);
   if (!res.ok) throw new Error('Could not reach server');
   return res.json();
 }
@@ -1100,7 +1118,7 @@ export async function setupServer(dto: {
   name?: string;
   instanceName?: string;
 }): Promise<AuthSession> {
-  const res = await fetch(`${API_BASE}/auth/setup`, {
+  const res = await authFetch(`${API_BASE}/auth/setup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dto),
@@ -1116,7 +1134,7 @@ export async function loginToServer(dto: {
   email: string;
   password: string;
 }): Promise<AuthSession> {
-  const res = await fetch(`${API_BASE}/auth/login`, {
+  const res = await authFetch(`${API_BASE}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dto),
@@ -1129,7 +1147,7 @@ export async function loginToServer(dto: {
 }
 
 export async function fetchMe(): Promise<{ user: AuthUser; instanceName: string }> {
-  const res = await fetch(`${API_BASE}/auth/me`, {
+  const res = await authFetch(`${API_BASE}/auth/me`, {
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error('Unauthorized');
@@ -1137,7 +1155,7 @@ export async function fetchMe(): Promise<{ user: AuthUser; instanceName: string 
 }
 
 export async function logoutFromServer(): Promise<void> {
-  await fetch(`${API_BASE}/auth/logout`, {
+  await authFetch(`${API_BASE}/auth/logout`, {
     method: 'POST',
     headers: authHeaders(),
   });
@@ -1147,7 +1165,7 @@ export async function changePassword(dto: {
   currentPassword: string;
   newPassword: string;
 }): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/auth/change-password`, {
+  const res = await authFetch(`${API_BASE}/auth/change-password`, {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify(dto),
@@ -1170,7 +1188,7 @@ export interface SystemUpdateInfo {
 }
 
 export async function checkSystemUpdates(): Promise<SystemUpdateInfo> {
-  const res = await fetch(`${API_BASE}/system/updates/check`, {
+  const res = await authFetch(`${API_BASE}/system/updates/check`, {
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error('Failed to check for system updates');
@@ -1178,7 +1196,7 @@ export async function checkSystemUpdates(): Promise<SystemUpdateInfo> {
 }
 
 export async function applySystemUpdate(): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/system/updates/apply`, {
+  const res = await authFetch(`${API_BASE}/system/updates/apply`, {
     method: 'POST',
     headers: authHeaders(),
   });
@@ -1212,7 +1230,7 @@ export interface InviteInfoResponse {
 }
 
 export async function fetchTeamMembers(): Promise<TeamMember[]> {
-  const res = await fetch(`${API_BASE}/auth/members`, {
+  const res = await authFetch(`${API_BASE}/auth/members`, {
     headers: authHeaders(),
   });
   if (!res.ok) {
@@ -1227,7 +1245,7 @@ export async function inviteTeamMember(dto: {
   role: 'ADMIN' | 'DEVELOPER' | 'VIEWER';
   name?: string;
 }): Promise<{ member: TeamMember; inviteToken: string; message: string }> {
-  const res = await fetch(`${API_BASE}/auth/members/invite`, {
+  const res = await authFetch(`${API_BASE}/auth/members/invite`, {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify(dto),
@@ -1243,7 +1261,7 @@ export async function updateTeamMemberRole(
   id: string,
   role: 'ADMIN' | 'DEVELOPER' | 'VIEWER'
 ): Promise<TeamMember> {
-  const res = await fetch(`${API_BASE}/auth/members/${encodeURIComponent(id)}/role`, {
+  const res = await authFetch(`${API_BASE}/auth/members/${encodeURIComponent(id)}/role`, {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify({ role }),
@@ -1256,7 +1274,7 @@ export async function updateTeamMemberRole(
 }
 
 export async function removeTeamMember(id: string): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/auth/members/${encodeURIComponent(id)}`, {
+  const res = await authFetch(`${API_BASE}/auth/members/${encodeURIComponent(id)}`, {
     method: 'DELETE',
     headers: authHeaders(),
   });
@@ -1268,7 +1286,7 @@ export async function removeTeamMember(id: string): Promise<{ success: boolean; 
 }
 
 export async function fetchInviteInfo(token: string): Promise<InviteInfoResponse> {
-  const res = await fetch(`${API_BASE}/auth/invite/${encodeURIComponent(token)}`);
+  const res = await authFetch(`${API_BASE}/auth/invite/${encodeURIComponent(token)}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error((err as any).message || 'Invalid or expired invitation link');
@@ -1281,7 +1299,7 @@ export async function acceptTeamInvite(dto: {
   password: string;
   name?: string;
 }): Promise<AuthSession> {
-  const res = await fetch(`${API_BASE}/auth/accept-invite`, {
+  const res = await authFetch(`${API_BASE}/auth/accept-invite`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dto),

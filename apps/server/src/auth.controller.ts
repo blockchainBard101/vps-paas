@@ -9,16 +9,19 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { AuthService } from './auth.service.js';
+import { Public } from './public.decorator.js';
 
 @Controller('api/auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  @Public()
   @Get('status')
   getStatus() {
     return this.authService.getStatus();
   }
 
+  @Public()
   @Post('setup')
   setup(
     @Body()
@@ -32,6 +35,7 @@ export class AuthController {
     return this.authService.setup(body);
   }
 
+  @Public()
   @Post('login')
   login(@Body() body: { email: string; password: string }) {
     return this.authService.login(body);
@@ -129,11 +133,13 @@ export class AuthController {
 
   // ── Public Invite Verification & Acceptance ──────────────────────────────
 
+  @Public()
   @Get('invite/:token')
   getInviteInfo(@Param('token') token: string) {
     return this.authService.getInviteInfo(token);
   }
 
+  @Public()
   @Post('accept-invite')
   acceptInvite(
     @Body() body: { token: string; password: string; name?: string },
