@@ -6,12 +6,8 @@ import {
   X,
   Copy,
   Check,
-  ArrowDown,
   Clock,
   WrapText,
-  AlertCircle,
-  AlertTriangle,
-  Info,
   Filter,
 } from 'lucide-react';
 
@@ -53,21 +49,45 @@ const ANSI_COLOR_MAP: Record<string, string> = {
   '95': '#e9d5ff', // Bright Purple
   '96': '#67e8f9', // Bright Cyan
   '97': '#ffffff', // Bright White
-
-  // 256-color common codes
-  '38;5;1': '#ef4444',
-  '38;5;2': '#10b981',
-  '38;5;3': '#f59e0b',
-  '38;5;4': '#3b82f6',
-  '38;5;5': '#a855f7',
-  '38;5;6': '#06b6d4',
 };
 
-// Matches standard ANSI (\x1b[...m) as well as unescaped/stripped CSI ([...m)
-const ANSI_REGEX = /(?:\x1b\[|(?<=\s|^|Z\s*))\[((?:\d+;?)+)m/g;
+// 256-color palette shortcuts for terminal tools
+const ANSI_256_COLORS: Record<number, string> = {
+  1: '#ef4444', // Red
+  2: '#10b981', // Green
+  3: '#f59e0b', // Amber / Orange
+  4: '#3b82f6', // Blue
+  5: '#a855f7', // Purple
+  6: '#06b6d4', // Cyan
+  7: '#e4e4e7', // White
+  8: '#71717a', // Gray
+  9: '#f87171', // Light Red
+  10: '#34d399', // Light Green
+  11: '#fbbf24', // Light Yellow
+  12: '#60a5fa', // Light Blue
+  13: '#c084fc', // Light Magenta
+  14: '#22d3ee', // Light Cyan
+  15: '#ffffff', // Bright White
+  16: '#000000',
+  208: '#f97316', // Orange
+  214: '#fb923c', // Light Orange
+  220: '#facc15', // Gold
+  226: '#fef08a', // Yellow
+};
+
+// Matches ANSI SGR color/style sequences with optional escape byte (\x1b)
+const ANSI_REGEX = /\x1b?\[((?:\d+;?)+)m/g;
+
+// Cleans up non-color terminal sequences (e.g. erase line \x1b[2K, cursor moves, private modes)
+const NON_COLOR_ANSI_REGEX = /\x1b\[[0-9;]*[a-ln-zA-Z]|\x1b\([AB0-2]|\x1b\][^\x07\x1b]*[\x07\x1b]/g;
+
+// Docker ISO-8601 timestamp prefix
 const DOCKER_TIMESTAMP_REGEX = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s*/;
 
 function parseAnsiTokens(text: string): AnsiToken[] {
+  // Strip non-color terminal controls first
+  const sanitized = text.replace(NON_COLOR_ANSI_REGEX, '');
+
   const tokens: AnsiToken[] = [];
   let lastIndex = 0;
   let currentColor: string | undefined = undefined;
@@ -79,10 +99,10 @@ function parseAnsiTokens(text: string): AnsiToken[] {
   ANSI_REGEX.lastIndex = 0;
   let match: RegExpExecArray | null;
 
-  while ((match = ANSI_REGEX.exec(text)) !== null) {
+  while ((match = ANSI_REGEX.exec(sanitized)) !== null) {
     if (match.index > lastIndex) {
       tokens.push({
-        text: text.slice(lastIndex, match.index),
+        text: sanitized.slice(lastIndex, match.index),
         color: currentColor,
         bgColor: currentBgColor,
         bold: isBold,
@@ -91,35 +111,44 @@ function parseAnsiTokens(text: string): AnsiToken[] {
       });
     }
 
-    const code = match[1];
-    if (code === '0' || code === '39') {
-      currentColor = undefined;
-      currentBgColor = undefined;
-      isBold = false;
-      isDim = false;
-      isUnderline = false;
-    } else if (code === '1') {
-      isBold = true;
-    } else if (code === '2') {
-      isDim = true;
-    } else if (code === '4') {
-      isUnderline = true;
-    } else if (ANSI_COLOR_MAP[code]) {
-      currentColor = ANSI_COLOR_MAP[code];
-    } else if (code.startsWith('38;5;')) {
-      const idx = parseInt(code.split(';')[2], 10);
-      if (idx === 3) currentColor = '#f59e0b'; // Amber
-      else if (idx === 1) currentColor = '#ef4444'; // Red
-      else if (idx === 2) currentColor = '#10b981'; // Green
-      else currentColor = '#38bdf8'; // Cyan default
+    const subCodes = match[1].split(';');
+    for (let i = 0; i < subCodes.length; i++) {
+      const c = subCodes[i];
+      if (c === '0') {
+        currentColor = undefined;
+        currentBgColor = undefined;
+        isBold = false;
+        isDim = false;
+        isUnderline = false;
+      } else if (c === '1') {
+        isBold = true;
+      } else if (c === '2') {
+        isDim = true;
+      } else if (c === '4') {
+        isUnderline = true;
+      } else if (c === '39') {
+        currentColor = undefined;
+      } else if (c === '49') {
+        currentBgColor = undefined;
+      } else if (c === '38' && subCodes[i + 1] === '5' && subCodes[i + 2]) {
+        const idx = parseInt(subCodes[i + 2], 10);
+        currentColor = ANSI_256_COLORS[idx] || (idx === 3 ? '#fbbf24' : '#38bdf8');
+        i += 2; // skip sub-arguments
+      } else if (c === '48' && subCodes[i + 1] === '5' && subCodes[i + 2]) {
+        const idx = parseInt(subCodes[i + 2], 10);
+        currentBgColor = ANSI_256_COLORS[idx];
+        i += 2;
+      } else if (ANSI_COLOR_MAP[c]) {
+        currentColor = ANSI_COLOR_MAP[c];
+      }
     }
 
     lastIndex = ANSI_REGEX.lastIndex;
   }
 
-  if (lastIndex < text.length) {
+  if (lastIndex < sanitized.length) {
     tokens.push({
-      text: text.slice(lastIndex),
+      text: sanitized.slice(lastIndex),
       color: currentColor,
       bgColor: currentBgColor,
       bold: isBold,
@@ -139,7 +168,8 @@ function detectLogLevel(raw: string): 'error' | 'warn' | 'info' | 'normal' {
     lower.includes('error [') ||
     lower.includes('failed') ||
     lower.includes('exception') ||
-    lower.includes('fatal')
+    lower.includes('fatal') ||
+    lower.includes('error')
   ) {
     return 'error';
   }
@@ -277,7 +307,7 @@ export function AnsiLogViewer({
           {filterQuery && (
             <button
               onClick={() => setFilterQuery('')}
-              className="text-zinc-500 hover:text-zinc-300 p-0.5"
+              className="text-zinc-500 hover:text-zinc-300 p-0.5 cursor-pointer"
             >
               <X className="w-3 h-3" />
             </button>
@@ -291,7 +321,7 @@ export function AnsiLogViewer({
             <button
               type="button"
               onClick={() => setLevelFilter('all')}
-              className={`px-2 py-0.5 rounded transition-colors ${
+              className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
                 levelFilter === 'all'
                   ? 'bg-zinc-800 text-zinc-100 font-semibold'
                   : 'text-zinc-400 hover:text-zinc-200'
@@ -302,7 +332,7 @@ export function AnsiLogViewer({
             <button
               type="button"
               onClick={() => setLevelFilter('error')}
-              className={`px-2 py-0.5 rounded transition-colors flex items-center gap-1 ${
+              className={`px-2 py-0.5 rounded transition-colors flex items-center gap-1 cursor-pointer ${
                 levelFilter === 'error'
                   ? 'bg-red-950/80 text-red-300 font-semibold border border-red-500/30'
                   : counts.error > 0
@@ -316,7 +346,7 @@ export function AnsiLogViewer({
             <button
               type="button"
               onClick={() => setLevelFilter('warn')}
-              className={`px-2 py-0.5 rounded transition-colors flex items-center gap-1 ${
+              className={`px-2 py-0.5 rounded transition-colors flex items-center gap-1 cursor-pointer ${
                 levelFilter === 'warn'
                   ? 'bg-amber-950/80 text-amber-300 font-semibold border border-amber-500/30'
                   : counts.warn > 0
@@ -335,7 +365,7 @@ export function AnsiLogViewer({
           <button
             type="button"
             onClick={() => setShowTimestamps((prev) => !prev)}
-            className={`p-1.5 rounded-lg border transition-colors ${
+            className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
               showTimestamps
                 ? 'bg-zinc-800/80 text-indigo-400 border-indigo-500/30'
                 : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-zinc-200'
@@ -349,7 +379,7 @@ export function AnsiLogViewer({
           <button
             type="button"
             onClick={() => setWrapLines((prev) => !prev)}
-            className={`p-1.5 rounded-lg border transition-colors ${
+            className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
               wrapLines
                 ? 'bg-zinc-800/80 text-indigo-400 border-indigo-500/30'
                 : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-zinc-200'
