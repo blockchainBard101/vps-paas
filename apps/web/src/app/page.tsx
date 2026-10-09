@@ -195,14 +195,16 @@ export default function Home() {
   }
 
   // ── Authenticated app ──────────────────────────────────────────────────────
+  const isAdmin = auth.phase === 'app' && (auth.user.role === 'OWNER' || auth.user.role === 'ADMIN');
+
   return (
     <main className="w-screen h-screen overflow-hidden bg-[#09090b]">
-      {currentView === 'settings' ? (
+      {currentView === 'settings' && isAdmin ? (
         <SystemSettingsView onBackToProjects={handleBackToProjects} />
       ) : currentView === 'projects' ? (
         <ProjectsDashboard
           onOpenProject={handleOpenProject}
-          onOpenSettings={handleOpenSettings}
+          onOpenSettings={isAdmin ? handleOpenSettings : undefined}
           currentOrg={currentOrg}
           onOpenTeamModal={() => setIsTeamModalOpen(true)}
         />
@@ -210,7 +212,7 @@ export default function Home() {
         <RailwayCanvas
           activeProject={activeProject}
           onBackToProjects={handleBackToProjects}
-          onOpenSettings={handleOpenSettings}
+          onOpenSettings={isAdmin ? handleOpenSettings : undefined}
           onSelectProject={(proj) => {
             setActiveProject(proj);
             if (typeof window !== 'undefined') {
@@ -227,6 +229,7 @@ export default function Home() {
         onClose={() => setIsTeamModalOpen(false)}
         currentOrg={currentOrg}
         onSwitchOrg={setCurrentOrg}
+        currentUserRole={auth.phase === 'app' ? auth.user.role : undefined}
       />
     </main>
   );

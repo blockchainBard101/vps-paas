@@ -2,7 +2,9 @@ import { Controller, Get, Post, Put, Delete, Body, Param } from '@nestjs/common'
 import { SystemSettingsService, SystemSettingsData } from './system-settings.service.js';
 import { ServicesService } from './services.service.js';
 import { CaddyService } from './caddy.service.js';
+import { Roles } from './roles.decorator.js';
 
+@Roles('OWNER', 'ADMIN')
 @Controller('api/system')
 export class SystemSettingsController {
   constructor(

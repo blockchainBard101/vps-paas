@@ -31,6 +31,7 @@ interface AuthAndTeamModalProps {
   onClose: () => void;
   currentOrg: string;
   onSwitchOrg: (org: string) => void;
+  currentUserRole?: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER';
 }
 
 export function AuthAndTeamModal({
@@ -38,11 +39,17 @@ export function AuthAndTeamModal({
   onClose,
   currentOrg,
   onSwitchOrg,
+  currentUserRole,
 }: AuthAndTeamModalProps) {
   const [tab, setTab] = useState<'team' | 'invite' | 'auth'>('team');
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  // Determine current user permissions
+  const currentUser = members.find((m) => m.isYou);
+  const effectiveRole = currentUserRole || currentUser?.role;
+  const canManageTeam = effectiveRole === 'OWNER' || effectiveRole === 'ADMIN';
 
   // Invite state
   const [inviteName, setInviteName] = useState('');
@@ -61,6 +68,13 @@ export function AuthAndTeamModal({
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [copiedMemberId, setCopiedMemberId] = useState<string | null>(null);
+
+  // If a non-admin is on the invite tab, route back to team tab
+  useEffect(() => {
+    if (!canManageTeam && tab === 'invite') {
+      setTab('team');
+    }
+  }, [canManageTeam, tab]);
 
   useEffect(() => {
     if (isOpen) {
@@ -212,19 +226,21 @@ export function AuthAndTeamModal({
               {members.length}
             </span>
           </button>
-          <button
-            onClick={() => {
-              setTab('invite');
-              resetInviteForm();
-            }}
-            className={`pb-2.5 font-medium border-b-2 transition-colors cursor-pointer ${
-              tab === 'invite'
-                ? 'border-indigo-500 text-indigo-400'
-                : 'border-transparent text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            + Invite Colleague
-          </button>
+          {canManageTeam && (
+            <button
+              onClick={() => {
+                setTab('invite');
+                resetInviteForm();
+              }}
+              className={`pb-2.5 font-medium border-b-2 transition-colors cursor-pointer ${
+                tab === 'invite'
+                  ? 'border-indigo-500 text-indigo-400'
+                  : 'border-transparent text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              + Invite Colleague
+            </button>
+          )}
           <button
             onClick={() => {
               setTab('auth');
@@ -273,15 +289,17 @@ export function AuthAndTeamModal({
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
                   </button>
-                  <button
-                    onClick={() => {
-                      setTab('invite');
-                      resetInviteForm();
-                    }}
-                    className="text-[11px] text-indigo-400 hover:text-indigo-300 font-medium transition-colors cursor-pointer"
-                  >
-                    + Invite
-                  </button>
+                  {canManageTeam && (
+                    <button
+                      onClick={() => {
+                        setTab('invite');
+                        resetInviteForm();
+                      }}
+                      className="text-[11px] text-indigo-400 hover:text-indigo-300 font-medium transition-colors cursor-pointer"
+                    >
+                      + Invite
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -342,8 +360,8 @@ export function AuthAndTeamModal({
 
                         {/* Actions & Role Badge */}
                         <div className="flex items-center gap-2 shrink-0">
-                          {/* Copy invite link button for pending invites */}
-                          {isPending && inviteUrl && (
+                          {/* Copy invite link button for pending invites (Admin/Owner only) */}
+                          {canManageTeam && isPending && inviteUrl && (
                             <button
                               onClick={() => copyToClipboard(inviteUrl, member.id)}
                               title="Copy invite link to share"
@@ -368,7 +386,7 @@ export function AuthAndTeamModal({
                             <span className="px-2 py-1 rounded-lg text-[10px] font-mono uppercase tracking-wider font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/30">
                               OWNER
                             </span>
-                          ) : (
+                          ) : canManageTeam ? (
                             <div className="flex items-center gap-1">
                               <select
                                 value={member.role}
@@ -412,6 +430,18 @@ export function AuthAndTeamModal({
                                 )}
                               </button>
                             </div>
+                          ) : (
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-mono uppercase tracking-wider font-semibold border ${
+                                member.role === 'ADMIN'
+                                  ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'
+                                  : member.role === 'DEVELOPER'
+                                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                                  : 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20'
+                              }`}
+                            >
+                              {member.role}
+                            </span>
                           )}
                         </div>
                       </div>
@@ -426,16 +456,18 @@ export function AuthAndTeamModal({
                   <p className="text-xs text-zinc-400">
                     No colleagues have been invited to this workspace yet.
                   </p>
-                  <button
-                    onClick={() => {
-                      setTab('invite');
-                      resetInviteForm();
-                    }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium transition-colors cursor-pointer shadow-sm"
-                  >
-                    <UserPlus className="w-3.5 h-3.5" />
-                    <span>Invite your first colleague</span>
-                  </button>
+                  {canManageTeam && (
+                    <button
+                      onClick={() => {
+                        setTab('invite');
+                        resetInviteForm();
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium transition-colors cursor-pointer shadow-sm"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>Invite your first colleague</span>
+                    </button>
+                  )}
                 </div>
               )}
 

@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { AuthService } from './auth.service.js';
 import { Public } from './public.decorator.js';
+import { Roles } from './roles.decorator.js';
 
 @Controller('api/auth')
 export class AuthController {
@@ -82,6 +83,7 @@ export class AuthController {
     return this.authService.getMembers(user.id);
   }
 
+  @Roles('OWNER', 'ADMIN')
   @Post('members/invite')
   inviteMember(
     @Headers('authorization') authHeader: string | undefined,
@@ -98,6 +100,7 @@ export class AuthController {
     return this.authService.inviteMember(body);
   }
 
+  @Roles('OWNER', 'ADMIN')
   @Post('members/:id/role')
   updateMemberRole(
     @Headers('authorization') authHeader: string | undefined,
@@ -115,6 +118,7 @@ export class AuthController {
     return this.authService.updateMemberRole(id, body.role);
   }
 
+  @Roles('OWNER', 'ADMIN')
   @Delete('members/:id')
   removeMember(
     @Headers('authorization') authHeader: string | undefined,
