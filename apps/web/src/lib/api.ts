@@ -1186,3 +1186,111 @@ export async function applySystemUpdate(): Promise<{ success: boolean; message: 
   return res.json();
 }
 
+// ── Team Members API ──────────────────────────────────────────────────────────
+
+export interface TeamMember {
+  id: string;
+  name: string;
+  email: string;
+  role: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER';
+  avatarInitials: string;
+  status: 'active' | 'invited';
+  isOwner: boolean;
+  isYou: boolean;
+  inviteToken?: string;
+  inviteExpiresAt?: string;
+  createdAt: string;
+  lastLoginAt?: string | null;
+}
+
+export interface InviteInfoResponse {
+  valid: boolean;
+  email: string;
+  name: string;
+  role: 'ADMIN' | 'DEVELOPER' | 'VIEWER';
+  instanceName: string;
+}
+
+export async function fetchTeamMembers(): Promise<TeamMember[]> {
+  const res = await fetch(`${API_BASE}/auth/members`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).message || 'Failed to fetch team members');
+  }
+  return res.json();
+}
+
+export async function inviteTeamMember(dto: {
+  email: string;
+  role: 'ADMIN' | 'DEVELOPER' | 'VIEWER';
+  name?: string;
+}): Promise<{ member: TeamMember; inviteToken: string; message: string }> {
+  const res = await fetch(`${API_BASE}/auth/members/invite`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(dto),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).message || 'Failed to send invitation');
+  }
+  return res.json();
+}
+
+export async function updateTeamMemberRole(
+  id: string,
+  role: 'ADMIN' | 'DEVELOPER' | 'VIEWER'
+): Promise<TeamMember> {
+  const res = await fetch(`${API_BASE}/auth/members/${encodeURIComponent(id)}/role`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).message || 'Failed to update member role');
+  }
+  return res.json();
+}
+
+export async function removeTeamMember(id: string): Promise<{ success: boolean; message: string }> {
+  const res = await fetch(`${API_BASE}/auth/members/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).message || 'Failed to remove member');
+  }
+  return res.json();
+}
+
+export async function fetchInviteInfo(token: string): Promise<InviteInfoResponse> {
+  const res = await fetch(`${API_BASE}/auth/invite/${encodeURIComponent(token)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).message || 'Invalid or expired invitation link');
+  }
+  return res.json();
+}
+
+export async function acceptTeamInvite(dto: {
+  token: string;
+  password: string;
+  name?: string;
+}): Promise<AuthSession> {
+  const res = await fetch(`${API_BASE}/auth/accept-invite`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(dto),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any).message || 'Failed to accept invitation');
+  }
+  return res.json();
+}
+
+

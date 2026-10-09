@@ -2,6 +2,8 @@ import {
   Controller,
   Get,
   Post,
+  Delete,
+  Param,
   Body,
   Headers,
   UnauthorizedException,
@@ -62,6 +64,81 @@ export class AuthController {
   ) {
     const token = this.extractToken(authHeader);
     return this.authService.changePassword(token, body);
+  }
+
+  // ── Team Members ─────────────────────────────────────────────────────────
+
+  @Get('members')
+  getMembers(@Headers('authorization') authHeader?: string) {
+    const token = this.extractToken(authHeader);
+    const user = this.authService.validateToken(token);
+    if (!user) {
+      throw new UnauthorizedException('Session expired or invalid.');
+    }
+    return this.authService.getMembers(user.id);
+  }
+
+  @Post('members/invite')
+  inviteMember(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: { email: string; role: 'ADMIN' | 'DEVELOPER' | 'VIEWER'; name?: string },
+  ) {
+    const token = this.extractToken(authHeader);
+    const user = this.authService.validateToken(token);
+    if (!user) {
+      throw new UnauthorizedException('Session expired or invalid.');
+    }
+    if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+      throw new UnauthorizedException('Only owners and admins can invite team members.');
+    }
+    return this.authService.inviteMember(body);
+  }
+
+  @Post('members/:id/role')
+  updateMemberRole(
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: { role: 'ADMIN' | 'DEVELOPER' | 'VIEWER' },
+    @Param('id') id: string,
+  ) {
+    const token = this.extractToken(authHeader);
+    const user = this.authService.validateToken(token);
+    if (!user) {
+      throw new UnauthorizedException('Session expired or invalid.');
+    }
+    if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+      throw new UnauthorizedException('Only owners and admins can update member roles.');
+    }
+    return this.authService.updateMemberRole(id, body.role);
+  }
+
+  @Delete('members/:id')
+  removeMember(
+    @Headers('authorization') authHeader: string | undefined,
+    @Param('id') id: string,
+  ) {
+    const token = this.extractToken(authHeader);
+    const user = this.authService.validateToken(token);
+    if (!user) {
+      throw new UnauthorizedException('Session expired or invalid.');
+    }
+    if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+      throw new UnauthorizedException('Only owners and admins can remove team members.');
+    }
+    return this.authService.removeMember(id);
+  }
+
+  // ── Public Invite Verification & Acceptance ──────────────────────────────
+
+  @Get('invite/:token')
+  getInviteInfo(@Param('token') token: string) {
+    return this.authService.getInviteInfo(token);
+  }
+
+  @Post('accept-invite')
+  acceptInvite(
+    @Body() body: { token: string; password: string; name?: string },
+  ) {
+    return this.authService.acceptInvite(body);
   }
 
   private extractToken(authHeader?: string): string {

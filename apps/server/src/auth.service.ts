@@ -14,6 +14,21 @@ export interface UserProfile {
   lastLoginAt?: string | null;
 }
 
+export interface StoredMember {
+  id: string;
+  name: string;
+  email: string;
+  role: 'ADMIN' | 'DEVELOPER' | 'VIEWER';
+  avatarInitials: string;
+  passwordHash?: string;
+  salt?: string;
+  inviteToken?: string;
+  inviteExpiresAt?: string;
+  status: 'active' | 'invited';
+  createdAt: string;
+  lastLoginAt?: string | null;
+}
+
 export interface StoredAdmin {
   id: string;
   name: string;
@@ -37,6 +52,7 @@ export interface AuthStorageData {
   isSetupComplete: boolean;
   instanceName: string;
   admin: StoredAdmin | null;
+  members: StoredMember[];
   sessions: UserSession[];
 }
 
@@ -47,6 +63,7 @@ export class AuthService implements OnModuleInit {
     isSetupComplete: false,
     instanceName: 'My Cloud PaaS',
     admin: null,
+    members: [],
     sessions: [],
   };
 
@@ -83,6 +100,7 @@ export class AuthService implements OnModuleInit {
           isSetupComplete: Boolean(parsed.isSetupComplete),
           instanceName: parsed.instanceName || 'My Cloud PaaS',
           admin: parsed.admin || null,
+          members: Array.isArray(parsed.members) ? parsed.members : [],
           sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
         };
         // Clean up expired sessions
@@ -203,52 +221,105 @@ export class AuthService implements OnModuleInit {
     const email = dto.email.trim().toLowerCase();
     const password = dto.password;
 
-    if (email !== this.data.admin.email.toLowerCase()) {
-      throw new UnauthorizedException('Invalid email or password.');
+    // Check primary admin
+    if (email === this.data.admin.email.toLowerCase()) {
+      const computedHash = this.hashPassword(password, this.data.admin.salt);
+      const storedBuf = Buffer.from(this.data.admin.passwordHash, 'hex');
+      const computedBuf = Buffer.from(computedHash, 'hex');
+
+      if (storedBuf.length !== computedBuf.length || !crypto.timingSafeEqual(storedBuf, computedBuf)) {
+        throw new UnauthorizedException('Invalid email or password.');
+      }
+
+      this.data.admin.lastLoginAt = new Date().toISOString();
+      const token = this.createSession(this.data.admin.id);
+      this.saveToDisk();
+
+      return {
+        token,
+        instanceName: this.data.instanceName,
+        user: {
+          id: this.data.admin.id,
+          name: this.data.admin.name,
+          email: this.data.admin.email,
+          role: this.data.admin.role,
+          avatarInitials: this.data.admin.avatarInitials,
+          createdAt: this.data.admin.createdAt,
+        },
+      };
     }
 
-    const computedHash = this.hashPassword(password, this.data.admin.salt);
-    const storedBuf = Buffer.from(this.data.admin.passwordHash, 'hex');
-    const computedBuf = Buffer.from(computedHash, 'hex');
+    // Check team members
+    const member = this.data.members.find((m) => m.email.toLowerCase() === email);
+    if (member) {
+      if (member.status === 'invited') {
+        throw new UnauthorizedException('This account invitation has not been accepted yet. Please use your invitation link.');
+      }
+      if (!member.passwordHash || !member.salt) {
+        throw new UnauthorizedException('Account credentials not configured. Please use your invitation link to set a password.');
+      }
 
-    if (storedBuf.length !== computedBuf.length || !crypto.timingSafeEqual(storedBuf, computedBuf)) {
-      throw new UnauthorizedException('Invalid email or password.');
+      const computedHash = this.hashPassword(password, member.salt);
+      const storedBuf = Buffer.from(member.passwordHash, 'hex');
+      const computedBuf = Buffer.from(computedHash, 'hex');
+
+      if (storedBuf.length !== computedBuf.length || !crypto.timingSafeEqual(storedBuf, computedBuf)) {
+        throw new UnauthorizedException('Invalid email or password.');
+      }
+
+      member.lastLoginAt = new Date().toISOString();
+      const token = this.createSession(member.id);
+      this.saveToDisk();
+
+      return {
+        token,
+        instanceName: this.data.instanceName,
+        user: {
+          id: member.id,
+          name: member.name,
+          email: member.email,
+          role: member.role,
+          avatarInitials: member.avatarInitials,
+          createdAt: member.createdAt,
+        },
+      };
     }
 
-    this.data.admin.lastLoginAt = new Date().toISOString();
-    const token = this.createSession(this.data.admin.id);
-    this.saveToDisk();
-
-    return {
-      token,
-      instanceName: this.data.instanceName,
-      user: {
-        id: this.data.admin.id,
-        name: this.data.admin.name,
-        email: this.data.admin.email,
-        role: this.data.admin.role,
-        avatarInitials: this.data.admin.avatarInitials,
-        createdAt: this.data.admin.createdAt,
-      },
-    };
+    throw new UnauthorizedException('Invalid email or password.');
   }
 
   validateToken(token: string): UserProfile | null {
     if (!token) return null;
     const now = new Date().toISOString();
     const session = this.data.sessions.find((s) => s.token === token && s.expiresAt > now);
-    if (!session || !this.data.admin || session.userId !== this.data.admin.id) {
-      return null;
+    if (!session) return null;
+
+    if (this.data.admin && session.userId === this.data.admin.id) {
+      return {
+        id: this.data.admin.id,
+        name: this.data.admin.name,
+        email: this.data.admin.email,
+        role: this.data.admin.role,
+        avatarInitials: this.data.admin.avatarInitials,
+        createdAt: this.data.admin.createdAt,
+        lastLoginAt: this.data.admin.lastLoginAt,
+      };
     }
-    return {
-      id: this.data.admin.id,
-      name: this.data.admin.name,
-      email: this.data.admin.email,
-      role: this.data.admin.role,
-      avatarInitials: this.data.admin.avatarInitials,
-      createdAt: this.data.admin.createdAt,
-      lastLoginAt: this.data.admin.lastLoginAt,
-    };
+
+    const member = this.data.members.find((m) => m.id === session.userId && m.status === 'active');
+    if (member) {
+      return {
+        id: member.id,
+        name: member.name,
+        email: member.email,
+        role: member.role,
+        avatarInitials: member.avatarInitials,
+        createdAt: member.createdAt,
+        lastLoginAt: member.lastLoginAt,
+      };
+    }
+
+    return null;
   }
 
   logout(token: string) {
@@ -260,7 +331,7 @@ export class AuthService implements OnModuleInit {
 
   changePassword(token: string, dto: { currentPassword: string; newPassword: string }) {
     const user = this.validateToken(token);
-    if (!user || !this.data.admin) {
+    if (!user) {
       throw new UnauthorizedException('Unauthorized.');
     }
 
@@ -268,24 +339,281 @@ export class AuthService implements OnModuleInit {
       throw new BadRequestException('New password must be at least 8 characters long.');
     }
 
-    // Verify current password
-    const computedHash = this.hashPassword(dto.currentPassword, this.data.admin.salt);
-    const storedBuf = Buffer.from(this.data.admin.passwordHash, 'hex');
-    const computedBuf = Buffer.from(computedHash, 'hex');
+    if (this.data.admin && user.id === this.data.admin.id) {
+      const computedHash = this.hashPassword(dto.currentPassword, this.data.admin.salt);
+      const storedBuf = Buffer.from(this.data.admin.passwordHash, 'hex');
+      const computedBuf = Buffer.from(computedHash, 'hex');
 
-    if (storedBuf.length !== computedBuf.length || !crypto.timingSafeEqual(storedBuf, computedBuf)) {
-      throw new BadRequestException('Current password is incorrect.');
+      if (storedBuf.length !== computedBuf.length || !crypto.timingSafeEqual(storedBuf, computedBuf)) {
+        throw new BadRequestException('Current password is incorrect.');
+      }
+
+      const newSalt = crypto.randomBytes(16).toString('hex');
+      this.data.admin.salt = newSalt;
+      this.data.admin.passwordHash = this.hashPassword(dto.newPassword, newSalt);
+
+      this.data.sessions = this.data.sessions.filter((s) => s.token === token);
+      this.saveToDisk();
+      return { success: true, message: 'Password updated successfully.' };
     }
 
-    // Hash new password with fresh salt
-    const newSalt = crypto.randomBytes(16).toString('hex');
-    this.data.admin.salt = newSalt;
-    this.data.admin.passwordHash = this.hashPassword(dto.newPassword, newSalt);
+    const member = this.data.members.find((m) => m.id === user.id && m.status === 'active');
+    if (member && member.passwordHash && member.salt) {
+      const computedHash = this.hashPassword(dto.currentPassword, member.salt);
+      const storedBuf = Buffer.from(member.passwordHash, 'hex');
+      const computedBuf = Buffer.from(computedHash, 'hex');
 
-    // Keep current session, purge others for security
-    this.data.sessions = this.data.sessions.filter((s) => s.token === token);
+      if (storedBuf.length !== computedBuf.length || !crypto.timingSafeEqual(storedBuf, computedBuf)) {
+        throw new BadRequestException('Current password is incorrect.');
+      }
+
+      const newSalt = crypto.randomBytes(16).toString('hex');
+      member.salt = newSalt;
+      member.passwordHash = this.hashPassword(dto.newPassword, newSalt);
+
+      this.data.sessions = this.data.sessions.filter((s) => s.token === token);
+      this.saveToDisk();
+      return { success: true, message: 'Password updated successfully.' };
+    }
+
+    throw new BadRequestException('Account not found.');
+  }
+
+  // ── Team Members & Access Control ──────────────────────────────────────────
+
+  getMembers(currentUserId?: string) {
+    const list: any[] = [];
+
+    if (this.data.admin) {
+      list.push({
+        id: this.data.admin.id,
+        name: this.data.admin.name,
+        email: this.data.admin.email,
+        role: this.data.admin.role,
+        avatarInitials: this.data.admin.avatarInitials,
+        status: 'active',
+        isOwner: true,
+        isYou: currentUserId === this.data.admin.id,
+        createdAt: this.data.admin.createdAt,
+        lastLoginAt: this.data.admin.lastLoginAt,
+      });
+    }
+
+    for (const m of this.data.members) {
+      list.push({
+        id: m.id,
+        name: m.name,
+        email: m.email,
+        role: m.role,
+        avatarInitials: m.avatarInitials,
+        status: m.status,
+        isOwner: false,
+        isYou: currentUserId === m.id,
+        inviteToken: m.inviteToken,
+        inviteExpiresAt: m.inviteExpiresAt,
+        createdAt: m.createdAt,
+        lastLoginAt: m.lastLoginAt,
+      });
+    }
+
+    return list;
+  }
+
+  inviteMember(dto: { email: string; role: 'ADMIN' | 'DEVELOPER' | 'VIEWER'; name?: string }) {
+    const email = dto.email?.trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      throw new BadRequestException('Please provide a valid email address.');
+    }
+
+    if (!['ADMIN', 'DEVELOPER', 'VIEWER'].includes(dto.role)) {
+      throw new BadRequestException('Invalid role. Role must be ADMIN, DEVELOPER, or VIEWER.');
+    }
+
+    if (this.data.admin && email === this.data.admin.email.toLowerCase()) {
+      throw new BadRequestException('The primary owner already has this email address.');
+    }
+
+    const existing = this.data.members.find((m) => m.email.toLowerCase() === email);
+    if (existing) {
+      if (existing.status === 'active') {
+        throw new BadRequestException('A team member with this email already exists.');
+      }
+      // Re-issue / refresh invite
+      existing.role = dto.role;
+      if (dto.name && dto.name.trim()) {
+        existing.name = dto.name.trim();
+        existing.avatarInitials = this.getInitials(existing.name);
+      }
+      existing.inviteToken = crypto.randomBytes(24).toString('hex');
+      existing.inviteExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      this.saveToDisk();
+
+      return {
+        member: {
+          id: existing.id,
+          name: existing.name,
+          email: existing.email,
+          role: existing.role,
+          avatarInitials: existing.avatarInitials,
+          status: existing.status,
+          isOwner: false,
+          isYou: false,
+          inviteToken: existing.inviteToken,
+          inviteExpiresAt: existing.inviteExpiresAt,
+          createdAt: existing.createdAt,
+        },
+        inviteToken: existing.inviteToken,
+        message: 'Existing invitation refreshed successfully.',
+      };
+    }
+
+    const name = dto.name?.trim() || email.split('@')[0];
+    const inviteToken = crypto.randomBytes(24).toString('hex');
+    const newMember: StoredMember = {
+      id: `usr-m-${crypto.randomBytes(6).toString('hex')}`,
+      name,
+      email,
+      role: dto.role,
+      avatarInitials: this.getInitials(name),
+      status: 'invited',
+      inviteToken,
+      inviteExpiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      createdAt: new Date().toISOString(),
+    };
+
+    this.data.members.push(newMember);
     this.saveToDisk();
 
-    return { success: true, message: 'Password updated successfully.' };
+    return {
+      member: {
+        id: newMember.id,
+        name: newMember.name,
+        email: newMember.email,
+        role: newMember.role,
+        avatarInitials: newMember.avatarInitials,
+        status: newMember.status,
+        isOwner: false,
+        isYou: false,
+        inviteToken: newMember.inviteToken,
+        inviteExpiresAt: newMember.inviteExpiresAt,
+        createdAt: newMember.createdAt,
+      },
+      inviteToken: newMember.inviteToken,
+      message: 'Invitation sent successfully.',
+    };
+  }
+
+  updateMemberRole(memberId: string, role: 'ADMIN' | 'DEVELOPER' | 'VIEWER') {
+    if (!['ADMIN', 'DEVELOPER', 'VIEWER'].includes(role)) {
+      throw new BadRequestException('Invalid role specified.');
+    }
+
+    if (memberId === this.data.admin?.id || memberId === 'usr-admin-primary') {
+      throw new BadRequestException('Cannot modify the role of the primary workspace owner.');
+    }
+
+    const member = this.data.members.find((m) => m.id === memberId);
+    if (!member) {
+      throw new BadRequestException('Member not found.');
+    }
+
+    member.role = role;
+    this.saveToDisk();
+
+    return {
+      id: member.id,
+      name: member.name,
+      email: member.email,
+      role: member.role,
+      avatarInitials: member.avatarInitials,
+      status: member.status,
+      isOwner: false,
+      isYou: false,
+      createdAt: member.createdAt,
+    };
+  }
+
+  removeMember(memberId: string) {
+    if (memberId === this.data.admin?.id || memberId === 'usr-admin-primary') {
+      throw new BadRequestException('Cannot remove the primary workspace owner.');
+    }
+
+    const index = this.data.members.findIndex((m) => m.id === memberId);
+    if (index === -1) {
+      throw new BadRequestException('Member not found.');
+    }
+
+    const removed = this.data.members.splice(index, 1)[0];
+    this.data.sessions = this.data.sessions.filter((s) => s.userId !== memberId);
+    this.saveToDisk();
+
+    return { success: true, message: `Removed ${removed.name} from team.` };
+  }
+
+  getInviteInfo(token: string) {
+    if (!token) throw new BadRequestException('Invalid invitation token.');
+    const member = this.data.members.find((m) => m.inviteToken === token);
+    if (!member) {
+      throw new BadRequestException('Invitation link is invalid or has expired.');
+    }
+
+    if (member.inviteExpiresAt && new Date(member.inviteExpiresAt) < new Date()) {
+      throw new BadRequestException('Invitation link has expired. Please ask an administrator to send a new invitation.');
+    }
+
+    return {
+      valid: true,
+      email: member.email,
+      name: member.name,
+      role: member.role,
+      instanceName: this.data.instanceName,
+    };
+  }
+
+  acceptInvite(dto: { token: string; password: string; name?: string }) {
+    if (!dto.token) throw new BadRequestException('Invalid invitation token.');
+    const member = this.data.members.find((m) => m.inviteToken === dto.token);
+    if (!member) {
+      throw new BadRequestException('Invitation link is invalid or has expired.');
+    }
+
+    if (member.inviteExpiresAt && new Date(member.inviteExpiresAt) < new Date()) {
+      throw new BadRequestException('Invitation link has expired. Please ask an administrator to send a new invitation.');
+    }
+
+    if (!dto.password || dto.password.length < 8) {
+      throw new BadRequestException('Password must be at least 8 characters long.');
+    }
+
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = this.hashPassword(dto.password, salt);
+
+    if (dto.name && dto.name.trim()) {
+      member.name = dto.name.trim();
+      member.avatarInitials = this.getInitials(member.name);
+    }
+
+    member.passwordHash = passwordHash;
+    member.salt = salt;
+    member.status = 'active';
+    member.inviteToken = undefined;
+    member.inviteExpiresAt = undefined;
+    member.lastLoginAt = new Date().toISOString();
+
+    const sessionToken = this.createSession(member.id);
+    this.saveToDisk();
+
+    return {
+      token: sessionToken,
+      instanceName: this.data.instanceName,
+      user: {
+        id: member.id,
+        name: member.name,
+        email: member.email,
+        role: member.role,
+        avatarInitials: member.avatarInitials,
+        createdAt: member.createdAt,
+      },
+    };
   }
 }
