@@ -53,6 +53,7 @@ import {
 } from '@/lib/api';
 import { DeleteServiceModal } from './DeleteServiceModal';
 import { GitHubIcon } from '../github/GitHubRepoModal';
+import { AnsiLogViewer } from '../terminal/AnsiLogViewer';
 
 interface ServiceDetailDrawerProps {
   service: {
@@ -1530,11 +1531,18 @@ export function ServiceDetailDrawer({
               </div>
             </div>
 
-            {/* Terminal View */}
-            <div className="flex-1 min-h-[380px] max-h-[460px] overflow-y-auto rounded-xl border border-zinc-800/90 bg-[#09090b] p-4 font-mono text-xs text-zinc-200 leading-relaxed shadow-2xl selection:bg-zinc-800 selection:text-emerald-300">
-              <pre className="whitespace-pre-wrap">{logs || 'Waiting for stream output...'}</pre>
-              <div ref={logsBottomRef} />
-            </div>
+            {/* Terminal View with ANSI Colors, Filtering & Formatting */}
+            <AnsiLogViewer
+              logs={logs}
+              autoScroll={autoScroll}
+              onToggleAutoScroll={() => setAutoScroll((prev) => !prev)}
+              className="flex-1 min-h-[420px] max-h-[500px]"
+              emptyMessage={
+                logSubTab === 'build'
+                  ? 'Waiting for build compilation stream output...'
+                  : 'Waiting for runtime container stream output...'
+              }
+            />
           </div>
         )}
 
